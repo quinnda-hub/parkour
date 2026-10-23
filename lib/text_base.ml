@@ -72,6 +72,11 @@ let skip_while ?label pred st pos =
   let stop = scan pred st.input pos in
   Pass { value = (); pos = stop; cut = false; hint = stop_hint label stop }
 
+let skip_line st pos =
+  match String.index_from_opt st.input pos '\n' with
+  | Some i -> pass () (i + 1)
+  | None -> pass () st.len
+
 (* Errors for the text primitives *)
 
 (* A custom failure at [pos] whose diagnostic underlines [start, stop). *)

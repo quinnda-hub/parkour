@@ -7,7 +7,8 @@
   test_engine
   test_source_render
   test_text
-  test_expr)
+  test_expr
+  test_recovery)
  (libraries parkour parkour_test_support qcheck-core qcheck-core.runner))
 
 (rule
@@ -19,4 +20,5 @@
    (run %{exe:test_engine.exe} --long)
    (run %{exe:test_source_render.exe} --long)
    (run %{exe:test_text.exe} --long)
-   (run %{exe:test_expr.exe} --long))))
+   (run %{exe:test_expr.exe} --long)
+   (run %{exe:test_recovery.exe} --long))))

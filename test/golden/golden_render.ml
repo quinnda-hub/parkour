@@ -224,3 +224,22 @@ let () =
   case "operator cannot be chained" expr "a < b < c";
   case "expression: operand expected after an operator" expr "a + * b";
   case "expression: operator expected after an operand" expr "a ! b"
+
+(* Error recovery: several diagnostics from one input *)
+
+let () =
+  let line = assignment <* (newline <|> eof) >>| fun v -> Some v in
+  let lines =
+    many (recover ~catch:`Any ~sync:skip_line ~fallback:(fun _ -> None) line)
+  in
+  let text = "ammo = banana\nlives = 3\nhealth 100\nmana = 5 5\nscore = 7\n" in
+  header "recovered: three diagnostics from one input";
+  let result, diagnostics = parse_partial lines text in
+  let src = Source.make ~name:"game.cfg" text in
+  List.iter (fun d -> show src d) diagnostics;
+  Printf.printf "partial result: %s\n"
+    (match result with
+    | None -> "none"
+    | Some l ->
+        String.concat " "
+          (List.map (function Some v -> v | None -> "<invalid>") l))

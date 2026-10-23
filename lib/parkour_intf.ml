@@ -76,12 +76,45 @@ module type S = sig
   val default_max_depth : int
   (** [5000]. *)
 
-  val parse : ?max_depth:int -> 'a t -> input -> ('a, Diagnostic.t list) result
+  val parse :
+    ?max_depth:int ->
+    ?max_errors:int ->
+    'a t ->
+    input ->
+    ('a, Diagnostic.t list) result
   (** [parse p input] runs [p] and requires it to consume the whole input. On
-      failure the list is non-empty and ordered by position. *)
+      failure the list is non-empty and ordered by position.
+
+      Without {{!recovery} error recovery} there is exactly one diagnostic. With
+      it, [Ok] is returned only if no error was recorded: recovering from an
+      error still makes [parse] return [Error], with every recorded diagnostic
+      (warnings included). Warnings alone do not make [parse] fail, but they are
+      dropped on [Ok]: use {!parse_partial} to see them.
+
+      [max_errors] (default [100], must be positive) caps the errors recorded:
+      once that many are recorded, further ones are dropped and parsing goes on
+      to the end as usual. *)
+
+  val parse_partial :
+    ?max_depth:int ->
+    ?max_errors:int ->
+    'a t ->
+    input ->
+    'a option * Diagnostic.t list
+  (** Like {!parse}, for tools that want a result despite errors. The value is
+      [Some v] if [p] (followed by end of input) finished, possibly after
+      recovering from errors, and [None] if it failed without recovering or the
+      nesting limit was exceeded. The diagnostics are everything recorded,
+      including warnings and the final failure, sorted by the start of their
+      span. After a [nesting too deep] abort they may include diagnostics of
+      branches that were still in progress and would have been abandoned. *)
 
   val parse_prefix :
-    ?max_depth:int -> 'a t -> input -> ('a * int, Diagnostic.t list) result
+    ?max_depth:int ->
+    ?max_errors:int ->
+    'a t ->
+    input ->
+    ('a * int, Diagnostic.t list) result
   (** Like {!parse} but stops wherever [p] stops, also returning the input index
       reached. *)
 
@@ -322,6 +355,88 @@ module type S = sig
   val between : _ t -> _ t -> 'a t -> 'a t
   (** [between open_ close p] is [open_ *> p <* close]. *)
 
+  (** {1:recovery Error recovery}
+
+      Recovery is opt-in: without it, parsing stops at the first error. A parser
+      that recovers records the error as a diagnostic, skips ahead to a
+      synchronisation point, substitutes a placeholder and carries on, so one
+      run reports many problems and still produces a (partial) result; see
+      {!parse_partial}. For example, a file of [name = value;] declarations
+      where a broken line is skipped:
+      {[
+      open (val Lexeme.make ())
+
+      let decl =
+        let+ name = identifier
+        and+ () = symbol "=" *> cut
+        and+ v = integer <* symbol ";" in
+        Some (name, v)
+
+      let file = many (recover ~sync:skip_line ~fallback:(fun _ -> None) decl)
+      ]}
+      On ["a = 1;\nb = ;\nc = 3;\n"], [parse_partial file] gives
+      [Some [Some ("a", 1); None; Some ("c", 3)]] and one diagnostic, for line
+      two.
+
+      Diagnostics are recorded transactionally: when a branch is abandoned (the
+      left side of [<|>] failed, a repetition stopped, a {!lookahead} or
+      {!not_followed_by} finished) whatever it recorded is forgotten. A recorded
+      diagnostic has the message and {!context} frames the top level would
+      report for that error. (Labels and {!hidden} enclosing the {!recover}, and
+      alternatives still pending outside it, are not reflected.) A recovery
+      error at the same place as the previous recovery error is dropped, as a
+      likely cascade; diagnostics from {!emit} never are.
+
+      Guidance:
+      - Put {!recover} around items that have a {!cut} after their first token,
+        so that only malformed items (not merely other alternatives) are
+        recovered from.
+      - Use [~catch:`Any] only where no alternative should run, such as
+        top-level items.
+      - Nested blocks recover best with a {!recover} at each level: the
+        synchronisation parser starts at the error's position, which may be deep
+        inside the block. *)
+
+  type catch = [ `Committed | `Any ]
+  (** Which failures {!recover} handles: those after a {!cut}, or all. *)
+
+  val recover :
+    ?catch:catch -> sync:_ t -> fallback:(Span.t -> 'a) -> 'a t -> 'a t
+  (** [recover ~sync ~fallback p] behaves like [p] when it succeeds. If [p]
+      fails (by default only after committing, so that alternatives still run
+      for other failures), the error is recorded as a diagnostic, [sync] runs
+      starting where the error was found, and the result is [fallback span]
+      where [span] covers the input from the start of [p] to where [sync]
+      stopped. The commitment of the failure is kept.
+
+      If [sync] fails, or the whole recovery consumes nothing, [p]'s failure is
+      returned unchanged (and not recorded) so that an outer [recover] can try;
+      this guarantees progress. Exceptions are not caught. *)
+
+  val skip_to : ?nested:_ t * _ t -> _ t -> unit t
+  (** [skip_to stop] skips tokens until [stop] would succeed here (without
+      consuming it) or the input ends. Never fails. With
+      [~nested:(open_, close)], opening and closing delimiters are tracked and
+      [stop] is only tried outside them; an unmatched [close] also ends the
+      skip, just before it. [open_] and [close] may be the same parser (a quote,
+      say), which then toggles inside. Skips one token at a time (one byte for
+      text). *)
+
+  val skip_past : ?nested:_ t * _ t -> _ t -> unit t
+  (** Like {!skip_to} but consumes the match of [stop]. *)
+
+  val or_insert : 'a -> 'a t -> 'a t
+  (** [or_insert v p] is [p] if it succeeds. If [p] fails without committing and
+      without consuming input, the failure is recorded (e.g. [expected ';'] for
+      a missing semicolon) and [v] is the result, consuming nothing. Other
+      failures are unchanged. Inside {!many}, make sure something else is
+      consumed on each iteration. *)
+
+  val emit : Diagnostic.t -> unit t
+  (** Records a diagnostic and continues, consuming nothing. A warning does not
+      make {!parse} fail; an error does. Errors count towards [max_errors]. An
+      emitted diagnostic is never dropped as a duplicate. *)
+
   (** {1 Tokens} *)
 
   val any : token t
@@ -407,6 +522,11 @@ module type TEXT = sig
   val none_of : string -> char t
   (** Any character except the given ones. Like {!any}, it expects nothing, so a
       failure reads [unexpected X]. *)
+
+  val skip_line : unit t
+  (** Skips through the next newline ([\n], so also [\r\n]), or to the end of
+      the input. Never fails; the usual [~sync] for {!recover} in line-based
+      formats. *)
 
   val newline : unit t
   (** ["\n"] or ["\r\n"]; expects [newline]. *)

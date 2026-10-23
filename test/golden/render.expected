@@ -266,3 +266,22 @@ error: expected '!', '+', '<', or end of input, found 'b'
   |
 1 | a ! b
   |     ^ expected '!', '+', '<', or end of input
+=== recovered: three diagnostics from one input ===
+error: expected integer, found "banana"
+ --> game.cfg:1:8
+  |
+1 | ammo = banana
+  |        ^^^^^^ expected integer
+  = while parsing assignment, from 1:1
+error: expected '=', found "100"
+ --> game.cfg:3:8
+  |
+3 | health 100
+  |        ^^^ expected '='
+  = while parsing assignment, from 3:1
+error: expected newline or end of input, found space
+ --> game.cfg:4:9
+  |
+4 | mana = 5 5
+  |         ^ expected newline or end of input
+partial result: <invalid> 3 <invalid> <invalid> 7

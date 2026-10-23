@@ -27,7 +27,27 @@ module Make (I : INPUT) = struct
     context : (string * int) list;  (** outermost first; start indices *)
   }
 
-  type state = { input : I.t; len : int; max_depth : int; mutable depth : int }
+  (* The constructs being parsed (see [context]), innermost first. One block
+     per frame, so entering a context allocates once. *)
+  type frames = No_frame | Frame of string * int * frames
+
+  (* A recorded diagnostic; [recovery] entries (from [recover], [or_insert]
+     and the final failure, as opposed to [emit]) take part in dedupe. *)
+  type entry = { diagnostic : Diagnostic.t; recovery : bool }
+
+  (* [log]: the diagnostics recorded by recovery, newest first, and [errors]:
+     how many of them are errors. Every point that backtracks restores both
+     (two field writes), so abandoned branches leave nothing behind. *)
+  type state = {
+    input : I.t;
+    len : int;
+    max_depth : int;
+    max_errors : int;
+    mutable depth : int;
+    mutable log : entry list;
+    mutable errors : int;
+    mutable frames : frames;
+  }
 
   (* [cut]: a commitment point was crossed inside this parser.
      [hint]: the furthest uncommitted failure seen on the way to this success,
@@ -139,18 +159,74 @@ module Make (I : INPUT) = struct
         in
         Diagnostic.make ?code ~context ~span message
 
-  let run max_depth p input =
-    let st = { input; len = I.length input; max_depth; depth = 0 } in
-    match p st 0 with
-    | Pass r -> Ok (r.value, r.pos)
-    | Fail r -> Error [ to_diagnostic st r.error ]
-    | exception Too_deep pos ->
-        let span = Span.point (I.span st.input (min pos st.len)).start in
-        Error
-          [
-            Diagnostic.make ~span
-              (Printf.sprintf "nesting too deep (more than %d levels)" max_depth);
-          ]
+  (* The diagnostic for an error that is being recovered from: the active
+     enclosing contexts that started before the error, then the error's own
+     frames, as if it had propagated to the top. *)
+  let recovered_diagnostic st e =
+    let rec enclosing acc = function
+      | No_frame -> acc
+      | Frame (name, start, rest) ->
+          enclosing (if start < e.pos then (name, start) :: acc else acc) rest
+    in
+    to_diagnostic st { e with context = enclosing [] st.frames @ e.context }
+
+  (* Recording. Past [max_errors] errors, further errors are dropped (the run
+     goes on). A recovery error is also dropped if the latest recovery error
+     starts at the same place (a cascade); [emit]ted diagnostics never are. *)
+  let record ~recovery st d =
+    if not (Diagnostic.is_error d) then
+      st.log <- { diagnostic = d; recovery } :: st.log
+    else if st.errors < st.max_errors then begin
+      let start = (Diagnostic.span d).start in
+      let rec duplicate = function
+        | [] -> false
+        | x :: rest ->
+            if x.recovery then (Diagnostic.span x.diagnostic).start = start
+            else duplicate rest
+      in
+      if not (recovery && duplicate st.log) then begin
+        st.log <- { diagnostic = d; recovery } :: st.log;
+        st.errors <- st.errors + 1
+      end
+    end
+
+  let restore st log errors =
+    st.log <- log;
+    st.errors <- errors
+
+  let run max_depth max_errors p input =
+    if max_errors < 1 then invalid_arg "Parkour: max_errors must be positive";
+    let st =
+      {
+        input;
+        len = I.length input;
+        max_depth;
+        max_errors;
+        depth = 0;
+        log = [];
+        errors = 0;
+        frames = No_frame;
+      }
+    in
+    let value =
+      match p st 0 with
+      | Pass r -> Some (r.value, r.pos)
+      | Fail r ->
+          record ~recovery:true st (to_diagnostic st r.error);
+          None
+      | exception Too_deep pos ->
+          let span = Span.point (I.span st.input (min pos st.len)).start in
+          record ~recovery:true st
+            (Diagnostic.make ~span
+               (Printf.sprintf "nesting too deep (more than %d levels)"
+                  max_depth));
+          None
+    in
+    let start d = (Diagnostic.span d).start in
+    ( value,
+      List.stable_sort
+        (fun a b -> compare (start a) (start b))
+        (List.rev_map (fun e -> e.diagnostic) st.log) )
 
   (* Basic combinators *)
 
@@ -211,10 +287,12 @@ module Make (I : INPUT) = struct
      committed [q] discards [p]'s failure: once committed, alternatives that
      were not taken are no longer relevant to the report. *)
   let alt p q st pos =
+    let log = st.log and errors = st.errors in
     match p st pos with
     | Pass _ as r -> r
     | Fail { cut = true; _ } as r -> r
     | Fail a -> (
+        restore st log errors;
         match q st pos with
         | Pass b when not b.cut ->
             Pass
@@ -281,7 +359,11 @@ module Make (I : INPUT) = struct
     let add e =
       if e.pos > pos then { e with context = (name, pos) :: e.context } else e
     in
-    match p st pos with
+    let frames = st.frames in
+    st.frames <- Frame (name, pos, frames);
+    let reply = p st pos in
+    st.frames <- frames;
+    match reply with
     | Pass ({ hint = Some h; _ } as r) ->
         Pass { value = r.value; pos = r.pos; cut = r.cut; hint = Some (add h) }
     | Pass _ as r -> r
@@ -335,7 +417,7 @@ module Make (I : INPUT) = struct
   (* Same as folding [alt], but iterative. *)
   let choice ?label:name ps =
     let p st pos =
-      let rec go err = function
+      let rec go log errors err = function
         | [] ->
             let error =
               match err with Some e -> e | None -> expect_error pos []
@@ -349,7 +431,8 @@ module Make (I : INPUT) = struct
                 | Some e ->
                     Pass { r with hint = keep r.pos (join (Some e) r.hint) })
             | Fail r when not r.cut ->
-                go
+                restore st log errors;
+                go log errors
                   (Some
                      (match err with
                      | None -> r.error
@@ -357,7 +440,7 @@ module Make (I : INPUT) = struct
                   rest
             | r -> r)
       in
-      go None ps
+      go st.log st.errors None ps
     in
     match name with None -> p | Some name -> label name p
 
@@ -374,6 +457,7 @@ module Make (I : INPUT) = struct
 
   let fold_loop name f init p st pos0 =
     let rec go acc pos cut hint =
+      let log = st.log and errors = st.errors in
       match p st pos with
       | Pass r ->
           if r.pos = pos then zero_width name pos;
@@ -381,6 +465,7 @@ module Make (I : INPUT) = struct
             (keep r.pos (join hint r.hint))
       | Fail r when r.cut -> Fail { error = with_hint hint r.error; cut = true }
       | Fail r ->
+          restore st log errors;
           Pass
             {
               value = acc;
@@ -414,10 +499,12 @@ module Make (I : INPUT) = struct
   let sep_end_by_named name ~sep p =
     let rest st pos0 =
       let rec go acc pos cut hint =
+        let log = st.log and errors = st.errors in
         match sep st pos with
         | Fail r when r.cut ->
             Fail { error = with_hint hint r.error; cut = true }
         | Fail r ->
+            restore st log errors;
             Pass
               {
                 value = acc;
@@ -427,6 +514,7 @@ module Make (I : INPUT) = struct
               }
         | Pass s -> (
             let cut = cut || s.cut and hint = keep s.pos (join hint s.hint) in
+            let log = st.log and errors = st.errors in
             match p st s.pos with
             | Pass r ->
                 if r.pos = pos then zero_width name pos;
@@ -435,6 +523,7 @@ module Make (I : INPUT) = struct
             | Fail r when r.cut ->
                 Fail { error = with_hint hint r.error; cut = true }
             | Fail r ->
+                restore st log errors;
                 Pass
                   {
                     value = acc;
@@ -469,6 +558,7 @@ module Make (I : INPUT) = struct
      discards [stop]'s failure, as in [alt]. *)
   let many_till p stop st pos0 =
     let rec go acc pos cut hint =
+      let log = st.log and errors = st.errors in
       match stop st pos with
       | Pass s ->
           Pass
@@ -480,6 +570,7 @@ module Make (I : INPUT) = struct
             }
       | Fail s when s.cut -> Fail { error = with_hint hint s.error; cut = true }
       | Fail s -> (
+          restore st log errors;
           match p st pos with
           | Pass r ->
               if r.pos = pos then zero_width "many_till" pos;
@@ -502,12 +593,18 @@ module Make (I : INPUT) = struct
     if pos >= st.len then pass () pos else fail_at pos [ Expected.End_of_input ]
 
   let lookahead p st pos =
-    match p st pos with
+    let log = st.log and errors = st.errors in
+    let reply = p st pos in
+    restore st log errors;
+    match reply with
     | Pass r -> pass r.value pos
     | Fail r -> Fail { r with cut = false }
 
   let not_followed_by p st pos =
-    match p st pos with
+    let log = st.log and errors = st.errors in
+    let reply = p st pos in
+    restore st log errors;
+    match reply with
     | Fail _ -> pass () pos
     | Pass r ->
         Fail
@@ -737,13 +834,93 @@ module Make (I : INPUT) = struct
     in
     bind p (fun a0 -> map (fold_right a0) (fold_loop "chainr1" cons [] step))
 
+  (* Error recovery (PLAN.md §5) *)
+
+  type catch = [ `Committed | `Any ]
+
+  let recover ?(catch = `Committed) ~sync ~fallback p st start =
+    match p st start with
+    | Pass _ as r -> r
+    | Fail { cut = false; _ } as r when catch = `Committed -> r
+    | Fail r as failed -> (
+        let log = st.log and errors = st.errors in
+        (* Recorded first, so that whatever [sync] logs cannot hide it. *)
+        record ~recovery:true st (recovered_diagnostic st r.error);
+        match sync st r.error.pos with
+        | Pass s when s.pos > start ->
+            Pass
+              {
+                value = fallback (source_span st start s.pos);
+                pos = s.pos;
+                cut = r.cut;
+                hint = None;
+              }
+        | _ ->
+            restore st log errors;
+            failed)
+
+  let or_insert default p st pos =
+    let log = st.log and errors = st.errors in
+    match p st pos with
+    | Fail { error; cut = false } when error.pos = pos ->
+        restore st log errors;
+        record ~recovery:true st (recovered_diagnostic st error);
+        pass default pos
+    | r -> r
+
+  let emit d st pos =
+    record ~recovery:false st d;
+    pass () pos
+
+  (* [past]: consume the match of [stop]. Probes run [q] at [pos] and answer
+     the end of its match, or -1; they leave no diagnostics. *)
+  let skip ~past ?nested stop st pos0 =
+    let probe q pos =
+      let log = st.log and errors = st.errors in
+      let e = match q st pos with Pass r -> r.pos | Fail _ -> -1 in
+      restore st log errors;
+      e
+    in
+    let rec go pos depth =
+      let e = if depth = 0 then probe stop pos else -1 in
+      if e >= 0 then pass () (if past then e else pos)
+      else if pos >= st.len then pass () pos
+      else
+        match nested with
+        | None -> go (pos + 1) 0
+        | Some (opener, closer) ->
+            (* Inside, [closer] first, so that identical delimiters work. *)
+            let c = if depth > 0 then probe closer pos else -1 in
+            if c >= 0 then go (max c (pos + 1)) (depth - 1)
+            else
+              let o = probe opener pos in
+              if o >= 0 then go (max o (pos + 1)) (depth + 1)
+              else if depth = 0 && probe closer pos >= 0 then pass () pos
+              else go (pos + 1) depth
+    in
+    go pos0 0
+
+  let skip_to ?nested stop = skip ~past:false ?nested stop
+  let skip_past ?nested stop = skip ~past:true ?nested stop
+
   (* Running *)
 
-  let parse_prefix ?(max_depth = default_max_depth) p input =
-    run max_depth p input
+  let parse_prefix ?(max_depth = default_max_depth) ?(max_errors = 100) p input
+      =
+    match run max_depth max_errors p input with
+    | Some (x, pos), log when not (List.exists Diagnostic.is_error log) ->
+        Ok (x, pos)
+    | _, log -> Error log
 
-  let parse ?(max_depth = default_max_depth) p input =
-    match run max_depth (seq p eof (fun x () -> x)) input with
-    | Ok (x, _) -> Ok x
-    | Error _ as e -> e
+  let parse_partial ?(max_depth = default_max_depth) ?(max_errors = 100) p input
+      =
+    let value, log =
+      run max_depth max_errors (seq p eof (fun x () -> x)) input
+    in
+    (Option.map fst value, log)
+
+  let parse ?max_depth ?max_errors p input =
+    match parse_partial ?max_depth ?max_errors p input with
+    | Some x, log when not (List.exists Diagnostic.is_error log) -> Ok x
+    | _, log -> Error log
 end

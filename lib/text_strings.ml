@@ -34,6 +34,7 @@ let quoted ?escape quote =
         else if c = '\\' && backslash then
           begin if i + 1 >= st.len then unterminated (i + 1)
           else
+            let log = st.log and errors = st.errors in
             match (Option.get escape) st i with
             | Pass r ->
                 if r.pos <= i then no_progress i;
@@ -45,6 +46,7 @@ let quoted ?escape quote =
                 go (Some b) r.pos r.pos
             | Fail { error = { kind = Expect _; pos; _ }; cut = false }
               when pos = i || pos = i + 1 ->
+                restore st log errors;
                 let n = Decode.length (Decode.decode s (i + 1)) in
                 custom_fail i ~start:i
                   ~stop:(i + 1 + n)
