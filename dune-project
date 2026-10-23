@@ -1,4 +1,4 @@
-(lang dune 3.0)
+(lang dune 3.5)
 
 (using menhir 2.1)
 
@@ -26,4 +26,4 @@
   (qcheck-core
    (and
     :with-test
-    (>= 0.20)))))
+    (>= 0.90)))))

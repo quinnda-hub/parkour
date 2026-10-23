@@ -2,7 +2,9 @@
    prints its [{[ ... ]}] blocks as one OCaml program, with line directives
    pointing back into the page; [extract output page] prints its [{v ... v}]
    blocks, the program's expected output. Blocks are delimited by lines that
-   are exactly the opening and closing markers. *)
+   are exactly the opening and closing markers. [extract compare expected
+   actual] checks the program's output, without depending on a [diff]
+   program. *)
 
 let blocks ~opening ~closing lines =
   let rec go acc current = function
@@ -26,17 +28,47 @@ let rec source_name path =
     source_name (String.sub path 3 (String.length path - 3))
   else path
 
+let read_lines file =
+  let ic = open_in_bin file in
+  let rec read n acc =
+    match input_line ic with
+    | line ->
+        let line =
+          if String.ends_with ~suffix:"\r" line then
+            String.sub line 0 (String.length line - 1)
+          else line
+        in
+        read (n + 1) ((n, line) :: acc)
+    | exception End_of_file -> List.rev acc
+  in
+  let lines = read 1 [] in
+  close_in ic;
+  lines
+
+(* Reports the first differing line, with the lines before it. *)
+let compare expected actual =
+  let rec go before = function
+    | [], [] -> ()
+    | e :: es, a :: as_ when snd e = snd a -> go (snd e :: before) (es, as_)
+    | es, as_ ->
+        let n = List.length before + 1 in
+        let show = function
+          | (_, line) :: _ -> line
+          | [] -> "<end of output>"
+        in
+        Printf.eprintf "%s and %s differ at line %d, after:\n" expected actual n;
+        List.iter (Printf.eprintf "  %s\n")
+          (List.rev (List.filteri (fun i _ -> i < 3) before));
+        Printf.eprintf "expected: %s\nactual:   %s\n" (show es) (show as_);
+        exit 1
+  in
+  go [] (read_lines expected, read_lines actual)
+
 let () =
   match Sys.argv with
+  | [| _; "compare"; expected; actual |] -> compare expected actual
   | [| _; mode; page |] ->
-      let ic = open_in_bin page in
-      let rec read n acc =
-        match input_line ic with
-        | line -> read (n + 1) ((n, line) :: acc)
-        | exception End_of_file -> List.rev acc
-      in
-      let lines = read 1 [] in
-      close_in ic;
+      let lines = read_lines page in
       let print_lines = List.iter print_endline in
       if mode = "code" then
         List.iter
@@ -49,5 +81,6 @@ let () =
           (fun (_, body) -> print_lines body)
           (blocks ~opening:"{v" ~closing:"v}" lines)
   | _ ->
-      prerr_endline "usage: extract (code | output) PAGE";
+      prerr_endline
+        "usage: extract (code | output) PAGE | extract compare EXPECTED ACTUAL";
       exit 2

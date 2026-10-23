@@ -1,7 +1,9 @@
-(* The Stack_overflow backstop. Run with a small OCaml 5 stack limit (see the
-   dune rule); on OCaml 4.14 native code the default 8 MB stack overflows the
-   same way. Kept apart from the other suites so that the limit does not
-   affect them. *)
+(* The Stack_overflow backstop. Run with a small stack limit (see the dune
+   rule), which the runtime enforces on OCaml 5 and in 4.14 bytecode. In 4.14
+   native code the stack is the system's: whether overflowing it raises
+   [Stack_overflow], and how deep it goes, depends on the platform and its
+   ulimit, so the test is skipped there. Kept apart from the other suites so
+   that the limit does not affect them. *)
 
 module P = Parkour
 module D = P.Diagnostic
@@ -46,7 +48,7 @@ let backstop =
         | Error [ d ] -> exhausted d <> None
         | _ -> false)
       (* With the default limit it is a nesting diagnostic whichever of the
-         limit and the stack runs out first (4.14 native: the stack). *)
+         limit and the stack runs out first. *)
       && (match P.parse deep input with
         | Error [ d ] ->
             String.starts_with ~prefix:"nesting too deep" (D.message d)
@@ -55,4 +57,8 @@ let backstop =
       && P.parse deep "((1))" = Ok 1
       && P.parse deep "1" = Ok 1)
 
-let () = Prop.run "stack" [ backstop ]
+let () =
+  if Sys.ocaml_release.major < 5 && Sys.backend_type = Sys.Native then
+    print_endline
+      "stack: skipped (OCaml 4.14 native code uses the system stack)"
+  else Prop.run "stack" [ backstop ]

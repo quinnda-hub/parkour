@@ -28,8 +28,8 @@
    (run %{exe:test_tokens.exe} --long)
    (run %{exe:test_robustness.exe} --long))))
 
-; The stack backstop needs a small stack limit (OCaml 5; ignored by 4.14, whose
-; native stack is the system's 8 MB).
+; The stack backstop needs a small stack limit (enforced on OCaml 5 and in 4.14
+; bytecode; the test skips itself in 4.14 native code).
 
 (executable
  (name test_stack)

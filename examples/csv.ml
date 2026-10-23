@@ -183,5 +183,7 @@ let () =
       summary result;
       Option.iter
         (fun t ->
-          List.iter (fun r -> print_endline (String.concat " | " r)) t.rows)
+          List.iter
+            (fun r -> print_endline (String.concat " | " r))
+            (t.header :: t.rows))
         result

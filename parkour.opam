@@ -9,9 +9,9 @@ authors: ["Quinn <quinn@quinnanhorn.com>"]
 license: "MIT"
 tags: ["parser" "parser combinators" "error recovery" "dsl"]
 depends: [
-  "dune" {>= "3.0"}
+  "dune" {>= "3.5"}
   "ocaml" {>= "4.14"}
-  "qcheck-core" {with-test & >= "0.20"}
+  "qcheck-core" {with-test & >= "0.90"}
   "odoc" {with-doc}
 ]
 build: [
