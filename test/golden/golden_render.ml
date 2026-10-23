@@ -202,3 +202,25 @@ let () =
   case "invalid UTF-8" (many Utf8.any) "caf\xe9 au lait";
   case "identifier on a reserved word" L.identifier "let = 1";
   case "keyword on a longer identifier" (L.keyword "if") "iffy = 1"
+
+(* Operator expressions *)
+
+let () =
+  let module L = (val Lexeme.make ()) in
+  (* Lexeme operators: underlines must not cover the whitespace they skip. *)
+  let op s f = L.symbol s >>| fun _ -> f in
+  let term = L.lexeme (satisfy "letter" is_letter) >>| String.make 1 in
+  let node name a b = Printf.sprintf "(%s %s %s)" name a b in
+  let expr =
+    L.space
+    *> expression term
+         [
+           [ Prefix (op "-" (fun a -> "(- " ^ a ^ ")")) ];
+           [ Postfix (op "!" (fun a -> "(" ^ a ^ " !)")) ];
+           [ Infix_left (op "+" (node "+")) ];
+           [ Infix_none (op "<" (node "<")) ];
+         ]
+  in
+  case "operator cannot be chained" expr "a < b < c";
+  case "expression: operand expected after an operator" expr "a + * b";
+  case "expression: operator expected after an operand" expr "a ! b"

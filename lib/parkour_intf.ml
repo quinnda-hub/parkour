@@ -250,6 +250,78 @@ module type S = sig
   val delay : (unit -> 'a t) -> 'a t
   (** [delay f] calls [f ()] each time the parser runs. *)
 
+  (** {1 Operators and grouping}
+
+      {!expression} parses operator expressions from a table of operators. The
+      table lists the levels from the tightest-binding to the loosest, and each
+      level mixes any {!operator}s, e.g.
+      {[
+      expression term
+        [
+          [ Infix_right pow ];
+          [ Prefix neg ];
+          [ Infix_left mul; Infix_left div ];
+          [ Infix_left add; Infix_left sub ];
+          [ Infix_none lt; Infix_none eq ];
+        ]
+      ]}
+
+      Rules:
+      - Tighter levels bind tighter. Within a level, a postfix operator binds
+        tighter than a prefix one, which binds tighter than an infix one: with
+        [-] prefix and [!] postfix on one level, [-x!] is [-(x!)]; with [-]
+        prefix and [+] infix, [-a+b] is [(-a)+b].
+      - A prefix operator may start any operand, even of a tighter operator:
+        [2 ^ -1] is [2 ^ (-1)]. Its own operand extends as far as its level
+        allows: in the table above [-2 ^ 2] is [-(2 ^ 2)] because [^] is tighter
+        than the prefix [-], and [-2 * 3] is [(-2) * 3].
+      - Prefix and postfix operators may repeat ([- - x], [x! !]).
+      - Left-associative operators group [a - b - c] as [(a - b) - c],
+        right-associative ones as [a ^ (b ^ c)]. Non-associative ones reject
+        [a < b < c], reporting [operator cannot be chained] and underlining the
+        second operator.
+      - A level may not mix {!Infix_left}, {!Infix_right} and {!Infix_none}.
+
+      Errors list every operator that could continue the expression; use
+      {!label} on operator parsers to shorten that. Operators are tried in table
+      order, so one that is a prefix of another (["<"] and ["<="]) must come
+      after it, or be written to fail on the longer one. Long chains of
+      operators do not consume stack. *)
+
+  type 'a operator =
+    | Prefix of ('a -> 'a) t
+    | Postfix of ('a -> 'a) t
+    | Infix_left of ('a -> 'a -> 'a) t
+    | Infix_right of ('a -> 'a -> 'a) t
+    | Infix_none of ('a -> 'a -> 'a) t
+        (** An operator and the function it applies. Parse the operator's token
+            (with trailing whitespace) and return the function. *)
+
+  val expression : 'a t -> 'a operator list list -> 'a t
+  (** [expression term table] parses [term]s combined with the table's
+      operators, tightest level first. Raises [Invalid_argument] immediately if
+      a level mixes infix associativities. Empty levels are ignored.
+
+      It is built from {!many}, {!choice} and sequencing: an operand is any
+      number of prefix operators then [term]; after an operand, postfix and
+      infix operators (each infix followed by an operand) are tried in table
+      order. Hence commitment, backtracking and error merging behave exactly as
+      for those combinators. An infix operator whose operand fails is not
+      consumed, so a [term] must not accept a tail that is also an operator.
+
+      The [operator cannot be chained] failure is reported where the expression
+      ends, like {!validate}, and does not commit. *)
+
+  val chainl1 : 'a t -> ('a -> 'a -> 'a) t -> 'a t
+  (** [chainl1 p op] parses [p] separated by [op], folding to the left:
+      [a - b - c] is [(a - b) - c]. Same as [expression p [[Infix_left op]]]. *)
+
+  val chainr1 : 'a t -> ('a -> 'a -> 'a) t -> 'a t
+  (** Like {!chainl1}, folding to the right: [a ^ b ^ c] is [a ^ (b ^ c)]. *)
+
+  val between : _ t -> _ t -> 'a t -> 'a t
+  (** [between open_ close p] is [open_ *> p <* close]. *)
+
   (** {1 Tokens} *)
 
   val any : token t

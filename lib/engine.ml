@@ -582,6 +582,161 @@ module Make (I : INPUT) = struct
   let peek st pos =
     pass (if pos < st.len then Some (I.get st.input pos) else None) pos
 
+  (* Operators and grouping (PLAN.md §3.7). Parsing is plain combinators, so
+     commitment, hints and merging are inherited; the parsed sequence is then
+     grouped by an iterative shunting-yard pass. *)
+
+  type 'a operator =
+    | Prefix of ('a -> 'a) t
+    | Postfix of ('a -> 'a) t
+    | Infix_left of ('a -> 'a -> 'a) t
+    | Infix_right of ('a -> 'a -> 'a) t
+    | Infix_none of ('a -> 'a -> 'a) t
+
+  (* Prefix operators (outermost first, with their right binding powers) and
+     the term they apply to. *)
+  type 'a operand = (int * ('a -> 'a)) list * 'a
+
+  type 'a segment =
+    | Post_seg of int * ('a -> 'a)  (** left binding power, function *)
+    | Infix_seg of {
+        lbp : int;
+        rbp : int;
+        none : bool;
+        f : 'a -> 'a -> 'a;
+        span : Span.t;
+        operand : 'a operand;
+      }
+
+  type 'a pending =
+    | Pending_prefix of int * ('a -> 'a)
+    | Pending_infix of int * bool * ('a -> 'a -> 'a)
+
+  (* [Error span]: a non-associative operator chained, [span] being the
+     second operator. *)
+  let group ((pres, v) : 'a operand) (segments : 'a segment list) =
+    let push_operand (ops, vals) (pres, v) =
+      ( List.fold_left (fun ops (r, f) -> Pending_prefix (r, f) :: ops) ops pres,
+        v :: vals )
+    in
+    (* Reduce the stacked operators that bind at least as tightly as the
+       incoming one, whose left binding power is [l]. *)
+    let rec reduce incoming l (ops, vals) =
+      match (ops, vals) with
+      | Pending_prefix (r, f) :: ops, v :: vals when r >= l ->
+          reduce incoming l (ops, f v :: vals)
+      | Pending_infix (r, none, f) :: ops, b :: a :: vals when r >= l -> (
+          match incoming with
+          | Some span when none && r = l -> Error span
+          | _ -> reduce incoming l (ops, f a b :: vals))
+      | _ -> Ok (ops, vals)
+    in
+    let ( let* ) = Result.bind in
+    let rec go stack = function
+      | [] -> (
+          let* _, vals = reduce None min_int stack in
+          match vals with [ v ] -> Ok v | _ -> assert false)
+      | Post_seg (l, f) :: rest -> (
+          let* ops, vals = reduce None l stack in
+          match vals with
+          | v :: vals -> go (ops, f v :: vals) rest
+          | [] -> assert false)
+      | Infix_seg s :: rest ->
+          let* ops, vals = reduce (Some s.span) s.lbp stack in
+          go
+            (push_operand
+               (Pending_infix (s.rbp, s.none, s.f) :: ops, vals)
+               s.operand)
+            rest
+    in
+    go (push_operand ([], []) (pres, v)) segments
+
+  let chained_message = "operator cannot be chained"
+
+  let expression term table =
+    let levels = List.filter (fun l -> l <> []) table in
+    let n = List.length levels in
+    let associativity = function
+      | Infix_left _ -> Some 0
+      | Infix_right _ -> Some 1
+      | Infix_none _ -> Some 2
+      | Prefix _ | Postfix _ -> None
+    in
+    List.iter
+      (fun level ->
+        match List.filter_map associativity level with
+        | a :: rest when List.exists (fun b -> a <> b) rest ->
+            invalid_arg
+              "Parkour.expression: a level mixes infix associativities"
+        | _ -> ())
+      levels;
+    (* Strength [i = n - k] for the k-th level; see PLAN.md §3.7. *)
+    let flat =
+      List.concat
+        (List.mapi
+           (fun k level -> List.map (fun op -> (n - k, op)) level)
+           levels)
+    in
+    let prefix_ps =
+      List.filter_map
+        (function
+          | i, Prefix p -> Some (map (fun f -> ((6 * i) + 2, f)) p) | _ -> None)
+        flat
+    in
+    let operand =
+      seq (many (choice prefix_ps)) term (fun pres v -> ((pres, v) : _ operand))
+    in
+    let infix i rbp none p =
+      seq (spanned p) operand (fun (f, span) operand ->
+          Infix_seg { lbp = 6 * i; rbp; none; f; span; operand })
+    in
+    let operator_ps =
+      List.filter_map
+        (fun (i, op) ->
+          match op with
+          | Prefix _ -> None
+          | Postfix p -> Some (map (fun f -> Post_seg ((6 * i) + 4, f)) p)
+          | Infix_left p -> Some (infix i (6 * i) false p)
+          | Infix_right p -> Some (infix i ((6 * i) - 1) false p)
+          | Infix_none p -> Some (infix i (6 * i) true p))
+        flat
+    in
+    let sequence = seq operand (many (choice operator_ps)) group in
+    fun st pos ->
+      match sequence st pos with
+      | Fail _ as r -> r
+      | Pass ({ value = Ok v; _ } as r) -> Pass { r with value = v }
+      | Pass { value = Error span; pos = stop; cut; hint } ->
+          let e =
+            {
+              pos = stop;
+              kind = Custom { code = None; message = chained_message };
+              span = Some span;
+              context = [];
+            }
+          in
+          Fail { error = with_hint hint e; cut }
+
+  let between o c p = seq (seq o p (fun _ x -> x)) c (fun x _ -> x)
+
+  let chainl1 p op =
+    let step = seq op p (fun f x -> (f, x)) in
+    bind p (fun x -> fold_loop "chainl1" (fun acc (f, y) -> f acc y) x step)
+
+  let chainr1 p op =
+    let step = seq op p (fun f x -> (f, x)) in
+    (* [rev_steps] is [(f_n, a_n); ...; (f_1, a_1)]: a0 f1 (a1 f2 (... an)). *)
+    let fold_right a0 = function
+      | [] -> a0
+      | (fn, an) :: rest ->
+          let rec go r f = function
+            | [] -> f a0 r
+            | (f', a) :: rest -> go (f a r) f' rest
+          in
+          go an fn rest
+    in
+    bind p (fun a0 -> map (fold_right a0) (fold_loop "chainr1" cons [] step))
+
   (* Running *)
 
   let parse_prefix ?(max_depth = default_max_depth) p input =

@@ -89,8 +89,9 @@ val render :
       shown as a window around the problem, with […] marking the cuts.
 
     Underlines are aligned for wide (e.g. CJK) and zero-width (combining)
-    characters using a built-in approximation of terminal widths. The result
-    ends with a newline. *)
+    characters using a built-in approximation of terminal widths. Underlines
+    stop before trailing whitespace in the span (such as what a lexeme skipped),
+    unless the span is only whitespace. The result ends with a newline. *)
 
 val pp_rendered :
   ?location:location ->

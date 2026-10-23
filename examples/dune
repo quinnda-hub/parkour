@@ -1,3 +1,3 @@
-(executable
- (name json)
+(executables
+ (names json calc)
  (libraries parkour))

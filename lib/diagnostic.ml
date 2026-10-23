@@ -186,6 +186,18 @@ let render ?(location = `Line_column) ?(color = false) ?(max_context = 2)
   let tab_width = max 1 tab_width and max_width = max 10 max_width in
   let start = clamp_offset src t.span.start in
   let stop = max start (clamp_offset src t.span.stop) in
+  (* Carets never cover trailing whitespace (e.g. what a lexeme skipped),
+     unless the span is all whitespace. *)
+  let stop =
+    let rec trim e =
+      if e > start then
+        match text.[e - 1] with
+        | ' ' | '\t' | '\n' | '\r' | '\x0c' -> trim (e - 1)
+        | _ -> e
+      else stop
+    in
+    trim stop
+  in
   let line_of o = (Source.position src o).line in
   let l1 = line_of start in
   let l2 = if stop > start then line_of (stop - 1) else l1 in

@@ -248,3 +248,21 @@ error: expected "if", found "iffy"
   |
 1 | iffy = 1
   | ^^^^ expected "if"
+=== operator cannot be chained ===
+error: operator cannot be chained
+ --> 1:7
+  |
+1 | a < b < c
+  |       ^
+=== expression: operand expected after an operator ===
+error: expected letter or '-', found '*'
+ --> 1:5
+  |
+1 | a + * b
+  |     ^ expected letter or '-'
+=== expression: operator expected after an operand ===
+error: expected '!', '+', '<', or end of input, found 'b'
+ --> 1:5
+  |
+1 | a ! b
+  |     ^ expected '!', '+', '<', or end of input

@@ -250,11 +250,18 @@ let gen_ascii_line =
     map (fun l -> (s, a, min l (String.length s - a))) (int_bound 8))
 
 let caret_alignment =
-  Prop.test ~name:"render: caret starts under the span's column (ASCII line)"
+  Prop.test
+    ~name:
+      "render: carets start under the span's column and cover it minus \
+       trailing whitespace (ASCII line)"
     ~print:Print.(triple print_text int int)
     gen_ascii_line
     (fun (s, a, l) ->
       let d = Diagnostic.make ~span:(Span.make ~start:a ~stop:(a + l)) "m" in
+      let rec trimmed l =
+        if l > 0 && s.[a + l - 1] = ' ' then trimmed (l - 1) else l
+      in
+      let l = if trimmed l = 0 then l else trimmed l in
       let out = Diagnostic.render (Source.make s) d in
       match String.split_on_char '\n' out with
       | _ :: _ :: _ :: _ :: caret :: _ ->
