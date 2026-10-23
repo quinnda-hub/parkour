@@ -331,11 +331,14 @@ let model_run g s =
             | Done (p, h), l -> (Done (p, max h ea), l)
             | Failed eb, l -> (Failed (max ea eb), l)))
     | Choice alternatives ->
+        (* Folding [Alt]: the last alternative's failure keeps its log. *)
         let rec first errs = function
           | [] -> (Failed (List.fold_left max pos errs), log)
           | p :: rest -> (
               match go p pos log with
               | Done (q, h), l -> (Done (q, List.fold_left max h errs), l)
+              | Failed e, l when rest = [] ->
+                  (Failed (List.fold_left max e errs), l)
               | Failed e, _ -> first (e :: errs) rest)
         in
         first [] alternatives

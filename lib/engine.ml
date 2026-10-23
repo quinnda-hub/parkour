@@ -559,7 +559,9 @@ module Make (I : INPUT) = struct
                     hint = keep_join r.pos (Some (merge_all errs)) r.hint;
                   })
         | Fail r when not r.cut ->
-            rollback st log errors tstart tstop;
+            (* Like [alt], the last alternative's failure keeps what it
+               logged; an enclosing backtracking point rolls it back. *)
+            if rest <> [] then rollback st log errors tstart tstop;
             let e = r.error in
             if e.pos > furthest then
               choice_go st pos log errors tstart tstop e.pos [ e ] rest
