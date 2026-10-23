@@ -415,7 +415,7 @@ let between_law =
       obs (run (P.between (P.char '(') (P.char ')') leaf) s)
       = obs (run P.(char '(' *> leaf <* char ')') s))
 
-(* Robustness *)
+(* Robustness. 10^6 chains: see test_robustness.ml. *)
 
 let robustness =
   Prop.test ~count:1 ~name:"very long chains parse without stack overflow"

@@ -9,7 +9,8 @@
   test_text
   test_expr
   test_recovery
-  test_tokens)
+  test_tokens
+  test_robustness)
  (libraries parkour parkour_test_support qcheck-core qcheck-core.runner))
 
 (rule
@@ -23,4 +24,5 @@
    (run %{exe:test_text.exe} --long)
    (run %{exe:test_expr.exe} --long)
    (run %{exe:test_recovery.exe} --long)
-   (run %{exe:test_tokens.exe} --long))))
+   (run %{exe:test_tokens.exe} --long)
+   (run %{exe:test_robustness.exe} --long))))

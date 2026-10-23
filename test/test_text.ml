@@ -703,7 +703,8 @@ let utf8_take_while =
           if at_bad then D.message d = "invalid UTF-8"
           else D.message d <> "invalid UTF-8")
 
-(* Robustness *)
+(* Robustness. Many consecutive comments, Utf8 and tokenize at 10^6:
+   see test_robustness.ml. *)
 
 let stack_safety =
   Prop.test ~count:1 ~name:"stack safety on 10 MB inputs" Gen.unit (fun () ->

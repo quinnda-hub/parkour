@@ -155,6 +155,7 @@ let cut_never_changes_success =
 
 let big = 1_000_000
 
+(* Angstrom #221: [count] was not tail-recursive; see [count big a] below. *)
 let stack_safety =
   Prop.test ~count:1 ~name:"stack safety on 10^6 items" Gen.unit (fun () ->
       let a = P.char 'a' in
