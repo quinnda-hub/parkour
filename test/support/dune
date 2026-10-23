@@ -1,0 +1,3 @@
+(library
+ (name parkour_test_support)
+ (libraries qcheck-core qcheck-core.runner))

@@ -1,0 +1,5 @@
+{0 Parkour}
+
+Parkour is a parser-combinator library for human-authored text, with precise
+syntax errors and opt-in error recovery. It is in early development; see
+{!Parkour} for the (currently empty) API.

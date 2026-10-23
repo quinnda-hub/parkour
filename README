@@ -1,0 +1,16 @@
+Parkour
+
+Parser combinators for human-authored text (config files, DSLs, small
+languages): precise, well-rendered syntax errors, opt-in error recovery, and
+zero runtime dependencies beyond the OCaml standard library.
+
+Status: early development, not yet released. Only the project skeleton exists;
+there is no usable parsing API yet.
+
+Build and test:
+
+  dune build              build the library
+  dune test               fast test tier
+  dune build @test-long   extensive test tier (QCheck --long)
+
+License: MIT (see LICENSE).
