@@ -133,9 +133,9 @@ v}
 
 [L.symbol s] matches [s] and returns it; [L.punct s] is the same but returns
 [()], for punctuation whose text is not needed (hence [and+ () = ...] above).
-[L.keyword s] matches a whole word (so [keyword "if"] rejects [iffy]);
-[L.identifier] reads a name that is not in the [~reserved] list; [L.lexeme p] is
-any parser [p] followed by whitespace. {!Parkour.hidden} keeps a parser out of
+[L.keyword s] matches a whole word (so [keyword "if"] rejects [iffy]), and
+[L.kw s] is its [()] counterpart. [L.identifier] reads a name that is not in the
+[~reserved] list; [L.lexeme p] is any parser [p] followed by whitespace. {!Parkour.hidden} keeps a parser out of
 the [expected ...] lists, and is what makes the whitespace skipping invisible in
 messages.
 
@@ -155,7 +155,7 @@ the one defined above):
 let semi = L.punct ";"
 
 let declaration =
-  let+ _ = L.keyword "let"
+  let+ () = L.kw "let"
   and+ name = L.identifier
   and+ () = L.punct "="
   and+ n = L.lexeme integer
@@ -187,7 +187,7 @@ backtrack past it, and a failure is reported as is:
 
 {[
 let declaration =
-  let+ _ = L.keyword "let" <* cut
+  let+ () = L.kw "let" <* cut
   and+ name = L.identifier
   and+ () = L.punct "="
   and+ n = L.lexeme integer
@@ -704,7 +704,7 @@ let json =
       dispatch ~label:"value" (function
         | '"' -> Some (L.lexeme string_literal >>| fun s -> Str s)
         | '[' -> Some list
-        | 't' -> Some (L.keyword "true" >>| fun _ -> Bool true)
+        | 't' -> Some (L.kw "true" *> return (Bool true))
         | '-' | '0' .. '9' -> Some (L.lexeme integer >>| fun n -> Int n)
         | _ -> None))
 

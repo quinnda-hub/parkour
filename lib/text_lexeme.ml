@@ -8,6 +8,7 @@ module type S = sig
   val symbol : string -> string t
   val punct : string -> unit t
   val keyword : string -> string t
+  val kw : string -> unit t
   val identifier : string t
 end
 
@@ -96,6 +97,7 @@ let make ?(line_comments = []) ?(block_comments = []) ?(nested_comments = false)
         then pass word (pos + n)
         else fail_at pos items)
   in
+  let kw word = map ignore (keyword word) in
   let identifier =
     let items = [ Expected.Label "identifier" ] in
     lexeme (fun st pos ->
@@ -112,5 +114,6 @@ let make ?(line_comments = []) ?(block_comments = []) ?(nested_comments = false)
     let symbol = symbol
     let punct = punct
     let keyword = keyword
+    let kw = kw
     let identifier = identifier
   end : S)

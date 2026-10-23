@@ -740,6 +740,10 @@ module type TEXT = sig
           consuming nothing, expecting [s] as a literal: [keyword "if"] on
           ["iffy"] reports [expected "if", found "iffy"]. *)
 
+      val kw : string -> unit t
+      (** [kw s] is [keyword s] returning [()], for keywords whose text is not
+          needed: [let+ () = kw "let" <* cut and+ name = identifier ...]. *)
+
       val identifier : string t
       (** An identifier start character followed by identifier characters,
           unless it is a reserved word, then {!space}. Otherwise fails at its

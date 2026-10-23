@@ -616,6 +616,8 @@ let keyword_prop =
     (fun (k, c) ->
       let module L = (val P.Lexeme.make ()) in
       let ident_char = c <> "" && (P.is_alnum c.[0] || c.[0] = '_') in
+      run (L.kw k) (k ^ c) = run P.(map ignore (L.keyword k)) (k ^ c)
+      &&
       match run (L.keyword k) (k ^ c) with
       | V (v, _) -> (not ident_char) && v = k
       | r -> ident_char && expects [ P.Expected.Literal k ] r)
