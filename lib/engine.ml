@@ -33,9 +33,10 @@ module Make (I : INPUT) = struct
      per frame, so entering a context allocates once. *)
   type frames = No_frame | Frame of string * int * frames
 
-  (* A recorded diagnostic; [recovery] entries (from [recover], [or_insert]
-     and the final failure, as opposed to [emit]) take part in dedupe. *)
-  type entry = { diagnostic : Diagnostic.t; recovery : bool }
+  (* A recorded diagnostic. Recovery entries (from [recover], [or_insert] and
+     the final failure, as opposed to [emit]) have [found], the source offset
+     where the failure was found; they take part in dedupe. *)
+  type entry = { diagnostic : Diagnostic.t; found : int option }
 
   (* [log]: the diagnostics recorded by recovery, newest first, and [errors]:
      how many of them are errors. Every point that backtracks restores both
@@ -49,6 +50,8 @@ module Make (I : INPUT) = struct
     mutable log : entry list;
     mutable errors : int;
     mutable frames : frames;
+    mutable trivia_start : int;
+    mutable trivia_stop : int;
   }
 
   (* [cut]: a commitment point was crossed inside this parser.
@@ -180,25 +183,35 @@ module Make (I : INPUT) = struct
     in
     to_diagnostic st { e with context = enclosing [] st.frames @ e.context }
 
+  (* The source offset of input index [pos]. *)
+  let offset st pos = (I.span st.input (min pos st.len)).start
+
   (* Recording. Past [max_errors] errors, further errors are dropped (the run
-     goes on). A recovery error is also dropped if the latest recovery error
-     starts at the same place (a cascade); [emit]ted diagnostics never are. *)
-  let record ~recovery st d =
+     goes on). A recovery error ([found] is the offset of its failure position)
+     is also dropped if the latest recovery error was found at the same offset
+     (a cascade); [emit]ted diagnostics ([found = None]) never are. *)
+  let record ~found st d =
     if not (Diagnostic.is_error d) then
-      st.log <- { diagnostic = d; recovery } :: st.log
+      st.log <- { diagnostic = d; found } :: st.log
     else if st.errors < st.max_errors then begin
-      let start = (Diagnostic.span d).start in
-      let rec duplicate = function
+      let rec duplicate f = function
         | [] -> false
-        | x :: rest ->
-            if x.recovery then (Diagnostic.span x.diagnostic).start = start
-            else duplicate rest
+        | { found = Some g; _ } :: _ -> f = g
+        | { found = None; _ } :: rest -> duplicate f rest
       in
-      if not (recovery && duplicate st.log) then begin
-        st.log <- { diagnostic = d; recovery } :: st.log;
+      let dup =
+        match found with Some f -> duplicate f st.log | None -> false
+      in
+      if not dup then begin
+        st.log <- { diagnostic = d; found } :: st.log;
         st.errors <- st.errors + 1
       end
     end
+
+  (* Remember that [start, stop) was skipped as trivia. *)
+  let note_trivia st start stop =
+    st.trivia_start <- start;
+    st.trivia_stop <- stop
 
   let restore st log errors =
     st.log <- log;
@@ -216,17 +229,21 @@ module Make (I : INPUT) = struct
         log = [];
         errors = 0;
         frames = No_frame;
+        trivia_start = 0;
+        trivia_stop = 0;
       }
     in
     let value =
       match p st 0 with
       | Pass r -> Some (r.value, r.pos)
       | Fail r ->
-          record ~recovery:true st (to_diagnostic st r.error);
+          record
+            ~found:(Some (offset st r.error.pos))
+            st (to_diagnostic st r.error);
           None
       | exception Too_deep pos ->
           let span = Span.point (I.span st.input (min pos st.len)).start in
-          record ~recovery:true st
+          record ~found:(Some span.start) st
             (Diagnostic.make ~span
                (Printf.sprintf "nesting too deep (more than %d levels)"
                   max_depth));
@@ -358,7 +375,11 @@ module Make (I : INPUT) = struct
   let hidden p st pos =
     match p st pos with
     | Pass { hint = Some _; value; pos = stop; cut } ->
+        if stop > pos then note_trivia st pos stop;
         Pass { value; pos = stop; cut; hint = None }
+    | Pass { pos = stop; _ } as r ->
+        if stop > pos then note_trivia st pos stop;
+        r
     | Fail { error = { kind = Expect { unexpected; _ }; _ } as e; cut }
       when e.pos = pos ->
         Fail
@@ -839,40 +860,6 @@ module Make (I : INPUT) = struct
 
   (* [seq (seq o p) c], except that a failure of [c] that is the reported
      one points back at the opener. *)
-  let between o c p st pos =
-    match o st pos with
-    | Fail _ as r -> r
-    | Pass a -> (
-        match p st a.pos with
-        | Fail b ->
-            Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut }
-        | Pass b -> (
-            let cut = a.cut || b.cut in
-            let hint = keep b.pos (join a.hint b.hint) in
-            match c st b.pos with
-            | Pass d ->
-                Pass
-                  {
-                    value = b.value;
-                    pos = d.pos;
-                    cut = cut || d.cut;
-                    hint = keep d.pos (join hint d.hint);
-                  }
-            | Fail d ->
-                let error = with_hint hint d.error in
-                let error =
-                  if d.error.pos >= error.pos && a.pos > pos && b.pos > a.pos
-                  then
-                    {
-                      error with
-                      labels =
-                        error.labels
-                        @ [ (source_span st pos a.pos, "opened here") ];
-                    }
-                  else error
-                in
-                Fail { error; cut = cut || d.cut }))
-
   let chainl1 p op =
     let step = seq op p (fun f x -> (f, x)) in
     bind p (fun x -> fold_loop "chainl1" (fun acc (f, y) -> f acc y) x step)
@@ -902,7 +889,10 @@ module Make (I : INPUT) = struct
     | Fail r as failed -> (
         let log = st.log and errors = st.errors in
         (* Recorded first, so that whatever [sync] logs cannot hide it. *)
-        record ~recovery:true st (recovered_diagnostic st r.error);
+        record
+          ~found:(Some (offset st r.error.pos))
+          st
+          (recovered_diagnostic st r.error);
         match sync st r.error.pos with
         | Pass s when s.pos > start ->
             Pass
@@ -916,17 +906,86 @@ module Make (I : INPUT) = struct
             restore st log errors;
             failed)
 
+  (* The diagnostic for a token that is missing at [e.pos]: an empty span at
+     the insertion point (just after the previous token, before any trivia),
+     and the token found there as an unlabelled secondary span. *)
+  let insertion_diagnostic st e extra_labels =
+    let d = recovered_diagnostic st e in
+    let at =
+      if st.trivia_stop = e.pos && st.trivia_start < e.pos then
+        (I.span st.input st.trivia_start).start
+      else if e.pos > 0 then (I.span st.input (e.pos - 1)).stop
+      else (I.span st.input e.pos).start
+    in
+    let found_span = Diagnostic.span d in
+    let labels =
+      Diagnostic.labels d
+      @ (if Span.is_empty found_span || found_span.start = at then []
+         else [ (found_span, "") ])
+      @ extra_labels
+    in
+    Diagnostic.make
+      ~severity:(if Diagnostic.is_error d then `Error else `Warning)
+      ?code:(Diagnostic.code d) ~expected:(Diagnostic.expected d)
+      ?found:(Diagnostic.found d) ~context:(Diagnostic.context d)
+      ?label:(Diagnostic.label d) ~labels ~notes:(Diagnostic.notes d)
+      ~span:(Span.point at) (Diagnostic.message d)
+
   let or_insert default p st pos =
     let log = st.log and errors = st.errors in
     match p st pos with
     | Fail { error; cut = false } when error.pos = pos ->
         restore st log errors;
-        record ~recovery:true st (recovered_diagnostic st error);
+        record
+          ~found:(Some (offset st error.pos))
+          st
+          (insertion_diagnostic st error []);
         pass default pos
     | r -> r
 
+  let between ?(or_insert = false) o c p st pos =
+    match o st pos with
+    | Fail _ as r -> r
+    | Pass a -> (
+        match p st a.pos with
+        | Fail b ->
+            Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut }
+        | Pass b -> (
+            let cut = a.cut || b.cut in
+            let hint = keep b.pos (join a.hint b.hint) in
+            let log = st.log and errors = st.errors in
+            let opened () =
+              if a.pos > pos && b.pos > a.pos then
+                [ (source_span st pos a.pos, "opened here") ]
+              else []
+            in
+            match c st b.pos with
+            | Pass d ->
+                Pass
+                  {
+                    value = b.value;
+                    pos = d.pos;
+                    cut = cut || d.cut;
+                    hint = keep d.pos (join hint d.hint);
+                  }
+            | Fail { error; cut = false } when or_insert && error.pos = b.pos ->
+                restore st log errors;
+                record
+                  ~found:(Some (offset st error.pos))
+                  st
+                  (insertion_diagnostic st error (opened ()));
+                Pass { value = b.value; pos = b.pos; cut; hint = None }
+            | Fail d ->
+                let error = with_hint hint d.error in
+                let error =
+                  if d.error.pos >= error.pos then
+                    { error with labels = error.labels @ opened () }
+                  else error
+                in
+                Fail { error; cut = cut || d.cut }))
+
   let emit d st pos =
-    record ~recovery:false st d;
+    record ~found:None st d;
     pass () pos
 
   (* [past]: consume the match of [stop]. Probes run [q] at [pos] and answer

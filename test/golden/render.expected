@@ -344,3 +344,18 @@ error: unterminated string
   |
 1 | "line one
   | ^
+=== or_insert: missing ';' before a newline ===
+error: expected ';', found "return"
+ --> 1:9
+  |
+1 | return a
+  |         ^ expected ';'
+2 | return b;
+  | ------
+=== between ~or_insert: unclosed at end of input ===
+error: expected ')', found end of input
+ --> 1:5
+  |
+1 | (a b
+  | - opened here
+  |     ^ expected ')'

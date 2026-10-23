@@ -1,0 +1,132 @@
+=== a valid program ===
+fn fib(n) {
+  if (n < 2) {
+    return n;
+  } else if (n == 2) {
+    return 1;
+  } else {
+    return (fib((n - 1)) + fib((n - 2)));
+  }
+}
+fn greet(name, excited) {
+  let punctuation = "!";
+  if !excited {
+    punctuation = ".";
+  }
+  print((("hello, " + name) + punctuation));
+}
+let i = 0;
+while ((i < 10) && !done(i)) {
+  print(((fib(i) * -2) + 1));
+  i = (i + 1);
+}
+greet("world", true);
+parsed: 2 functions, 14 statements
+=== missing semicolon ===
+error: expected ';', found "return"
+ --> gallery.mini:2:21
+  |
+2 |   let result = w * h
+  |                     ^ expected ';'
+3 |   return result;
+  |   ------
+parsed: 1 function, 2 statements
+=== unclosed brace at the end ===
+error: expected '}', found end of input
+ --> gallery.mini:6:2
+  |
+1 | fn countdown(n) {
+  |                 - opened here
+...
+6 | }
+  |  ^ expected '}'
+parsed: 1 function, 4 statements
+=== several broken statements in one function ===
+error: expected expression, found ';'
+ --> gallery.mini:2:11
+  |
+2 |   let x = ;
+  |           ^ expected expression
+error: expected ')', found ';'
+ --> gallery.mini:4:13
+  |
+4 |   y = (1 + 2;
+  |       - opened here
+  |             ^ expected ')'
+error: expected expression, found ')'
+ --> gallery.mini:5:12
+  |
+5 |   print(x, );
+  |            ^ expected expression
+error: expected ';', found '}'
+ --> gallery.mini:6:11
+  |
+6 |   return x
+  |           ^ expected ';'
+7 | }
+  | -
+parsed: 1 function, 6 statements (3 recovered)
+=== an error inside nested blocks ===
+error: expected expression, found ';'
+ --> gallery.mini:4:15
+  |
+4 |       n = n - ;
+  |               ^ expected expression
+parsed: 1 function, 5 statements (1 recovered)
+=== a broken function header ===
+error: expected ')' or ',', found 'm'
+ --> gallery.mini:1:12
+  |
+1 | fn drain(n m) {
+  |         - opened here
+  |            ^ expected ')' or ','
+error: expected expression, found ';'
+ --> gallery.mini:2:13
+  |
+2 |   return n +;
+  |             ^ expected expression
+parsed: 2 functions, 2 statements (1 recovered)
+=== reserved word as a name ===
+error: 'while' is a reserved word
+ --> gallery.mini:2:7
+  |
+2 |   let while = 10;
+  |       ^^^^^
+  = note: reserved words cannot be used as names
+error: 'while' is a reserved word
+ --> gallery.mini:3:10
+  |
+3 |   return while;
+  |          ^^^^^
+  = note: reserved words cannot be used as names
+parsed: 1 function, 2 statements (2 recovered)
+=== chained comparison ===
+error: operator cannot be chained
+ --> gallery.mini:2:18
+  |
+2 |   return low < x < high;
+  |                  ^
+parsed: 1 function, 1 statement (1 recovered)
+=== duplicate parameter ===
+error: duplicate parameter 'low'
+ --> gallery.mini:1:28
+  |
+1 | fn clamp(value, low, high, low) {
+  |                 --- first defined here
+  |                            ^^^
+parsed: 1 function, 1 statement
+=== bad character ===
+error: expected ';', found '#'
+ --> gallery.mini:1:15
+  |
+1 | let total = 10 # 3;
+  |               ^ expected ';'
+  |                -
+parsed: 0 functions, 3 statements (1 recovered)
+=== stray closing brace ===
+error: unmatched '}'
+ --> gallery.mini:4:1
+  |
+4 | }
+  | ^
+parsed: 1 function, 3 statements (1 recovered)

@@ -2,7 +2,7 @@
 ; `dune test` diffs it against <name>.expected (accept with `dune promote`).
 
 (executables
- (names json calc config csv values)
+ (names json calc config csv values mini mini_tokens)
  (libraries parkour))
 
 (rule
@@ -34,3 +34,23 @@
  (alias runtest)
  (action
   (diff values.expected values.output)))
+
+(rule
+ (with-stdout-to
+  mini.output
+  (run %{exe:mini.exe} --gallery)))
+
+(rule
+ (alias runtest)
+ (action
+  (diff mini.expected mini.output)))
+
+(rule
+ (with-stdout-to
+  mini_tokens.output
+  (run %{exe:mini_tokens.exe} --gallery)))
+
+(rule
+ (alias runtest)
+ (action
+  (diff mini_tokens.expected mini_tokens.output)))

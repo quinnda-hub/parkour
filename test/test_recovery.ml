@@ -422,6 +422,27 @@ let dedupe =
       let _, log = P.parse_partial p "" in
       List.length log = emitted + if List.mem Insert ops then 1 else 0)
 
+(* The cascade rule is about where the failure was found, not where the
+   diagnostic points: a missing token (shown at the end of the previous token)
+   followed by an error at the same next token is one error. *)
+let dedupe_insertion_point =
+  Prop.test ~name:"an insertion and an error at the same found token are one"
+    ~print:String.escaped
+    Gen.(string_size ~gen:(oneof_list [ ' '; '\n' ]) (int_bound 4))
+    (fun trivia ->
+      let module L = (val P.Lexeme.make ()) in
+      let p =
+        P.(
+          L.symbol "a"
+          *> or_insert () (map ignore (L.symbol ";"))
+          *> recover ~catch:`Any ~sync:(skip_to eof)
+               ~fallback:(fun _ -> ())
+               (map ignore (L.symbol "b")))
+      in
+      match P.parse_partial p ("a" ^ trivia ^ "#") with
+      | _, [ d ] -> (D.span d).start = 1 && D.message d <> ""
+      | _ -> false)
+
 (* or_insert *)
 
 let inserting =
@@ -549,5 +570,6 @@ let () =
       skipping;
       limit;
       dedupe;
+      dedupe_insertion_point;
       inserting;
     ]

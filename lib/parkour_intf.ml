@@ -350,7 +350,13 @@ module type S = sig
       {!label} on operator parsers to shorten that. Operators are tried in table
       order, so one that is a prefix of another (["<"] and ["<="]) must come
       after it, or be written to fail on the longer one. Long chains of
-      operators do not consume stack. *)
+      operators do not consume stack.
+
+      Put a {!cut} in operator parsers (after the operator's token): a missing
+      operand is then reported at the operand
+      ([expected expression, found ';']). Without it the operator is simply not
+      consumed, the expression ends before it, and the error shows up later at
+      the operator ([expected ';', found '-']). *)
 
   type 'a operator =
     | Prefix of ('a -> 'a) t
@@ -383,12 +389,19 @@ module type S = sig
   val chainr1 : 'a t -> ('a -> 'a -> 'a) t -> 'a t
   (** Like {!chainl1}, folding to the right: [a ^ b ^ c] is [a ^ (b ^ c)]. *)
 
-  val between : _ t -> _ t -> 'a t -> 'a t
+  val between : ?or_insert:bool -> _ t -> _ t -> 'a t -> 'a t
   (** [between open_ close p] is [open_ *> p <* close]. When [close] fails and
       its failure is the one reported and [p] consumed input, the diagnostic
       gets a secondary label ["opened here"] on the input [open_] consumed, so
       an unclosed bracket is shown together with where it was opened. (Right
-      after the opener, the caret already shows it.) *)
+      after the opener, the caret already shows it.)
+
+      With [~or_insert:true] (default [false]), if [close] fails without
+      committing right where [p] stopped, the failure is recorded as by
+      {!or_insert} (at the insertion point, with the token found there
+      underlined) together with the ["opened here"] label, and [between]
+      succeeds as if [close] had been present. The parse then reports the
+      problem but carries on. *)
 
   (** {1:recovery Error recovery}
 
@@ -419,8 +432,11 @@ module type S = sig
       diagnostic has the message and {!context} frames the top level would
       report for that error. (Labels and {!hidden} enclosing the {!recover}, and
       alternatives still pending outside it, are not reflected.) A recovery
-      error at the same place as the previous recovery error is dropped, as a
-      likely cascade; diagnostics from {!emit} never are.
+      error is dropped, as a likely cascade, if the previous recovery error was
+      found at the same position of the input (where the unexpected input is,
+      not where the diagnostic points: an {!or_insert} points at the end of the
+      previous token but was found at the next one); diagnostics from {!emit}
+      never are.
 
       Guidance:
       - Put {!recover} around items that have a {!cut} after their first token,
@@ -430,7 +446,11 @@ module type S = sig
         top-level items.
       - Nested blocks recover best with a {!recover} at each level: the
         synchronisation parser starts at the error's position, which may be deep
-        inside the block. *)
+        inside the block.
+      - The synchronisation parser starts {e at the error}, not at the start of
+        the item. If the error is a missing terminator just before the next
+        item, it can therefore skip that following item too; use {!or_insert}
+        for such terminators instead. *)
 
   type catch = [ `Committed | `Any ]
   (** Which failures {!recover} handles: those after a {!cut}, or all. *)
@@ -464,8 +484,14 @@ module type S = sig
   (** [or_insert v p] is [p] if it succeeds. If [p] fails without committing and
       without consuming input, the failure is recorded (e.g. [expected ';'] for
       a missing semicolon) and [v] is the result, consuming nothing. Other
-      failures are unchanged. Inside {!many}, make sure something else is
-      consumed on each iteration. *)
+      failures are unchanged.
+
+      The diagnostic points at the {e insertion point}, where the missing token
+      belongs: an empty span right after the previous token, before any
+      whitespace or comments (those skipped by {!hidden} parsers or [Lexeme]).
+      The token found instead is underlined as a secondary label with no text,
+      unless it starts at the insertion point. Inside {!many}, make sure
+      something else is consumed on each iteration. *)
 
   val emit : Diagnostic.t -> unit t
   (** Records a diagnostic and continues, consuming nothing. A warning does not

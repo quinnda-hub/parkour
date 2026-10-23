@@ -54,8 +54,12 @@ let make ?(line_comments = []) ?(block_comments = []) ?(nested_comments = false)
   in
   let space st pos =
     let s = st.input and len = st.len in
+    let finish i =
+      if i > pos then note_trivia st pos i;
+      pass () i
+    in
     let rec go i =
-      if i >= len then pass () i
+      if i >= len then finish i
       else if blank (String.unsafe_get s i) then go (i + 1)
       else
         (* Block openers first: a line opener may prefix one ("--", "--[["). *)
@@ -72,7 +76,7 @@ let make ?(line_comments = []) ?(block_comments = []) ?(nested_comments = false)
         | None ->
             if List.exists (starts_with s len i) line_comments then
               go (line_end s len i)
-            else pass () i
+            else finish i
     in
     go pos
   in

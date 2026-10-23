@@ -280,3 +280,16 @@ let () =
   case "unterminated multiline string"
     (quoted ~multiline:true '"')
     "\"line one\nline two\n"
+
+(* Insertion points: a missing token is reported where it belongs *)
+let () =
+  let module L = (val Lexeme.make ()) in
+  let stmt =
+    L.keyword "return" *> L.identifier *> or_insert "" (L.symbol ";")
+  in
+  case "or_insert: missing ';' before a newline" (many stmt)
+    "return a\nreturn b;\n";
+  let words =
+    between ~or_insert:true (L.symbol "(") (L.symbol ")") (many1 L.identifier)
+  in
+  case "between ~or_insert: unclosed at end of input" words "(a b\n"

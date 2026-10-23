@@ -326,6 +326,96 @@ let stack_safety =
           | Ok l -> List.length l = n
           | Error _ -> false))
 
+(* Insertion points *)
+
+module Trivia = (val P.Lexeme.make ~line_comments:[ "#" ] ())
+
+let gen_trivia =
+  Gen.(
+    map (String.concat "")
+      (list_size (int_bound 3)
+         (oneof_list [ " "; "\n"; "  "; "# note\n"; "\t" ])))
+
+type ins = X | Semi | Y
+
+module Ins_tok = struct
+  type t = ins
+
+  let equal = ( = )
+  let show = function X -> "x" | Semi -> ";" | Y -> "y"
+end
+
+module Ins = P.Tokens (Ins_tok)
+
+let ins_lexer =
+  let open P in
+  tokenize ~skip:Trivia.space
+    (choice
+       [
+         map (fun _ -> X) (char 'x');
+         map (fun _ -> Semi) (char ';');
+         map (fun _ -> Y) (char 'y');
+       ])
+
+let lexed s = Result.to_option (ins_lexer s)
+
+let insertion_point =
+  Prop.test ~name:"or_insert reports at the end of the previous token"
+    ~print:(fun (t, next) ->
+      Printf.sprintf "x%S%s" t (if next then "y" else ""))
+    Gen.(pair gen_trivia bool)
+    (fun (trivia, next) ->
+      let s = "x" ^ trivia ^ if next then "y" else "" in
+      let text =
+        P.(
+          Trivia.symbol "x"
+          *> or_insert ";" (Trivia.symbol ";")
+          *> many (Trivia.symbol "y"))
+      in
+      let toks =
+        Ins.(token X *> or_insert Semi (token Semi) *> many (token Y))
+      in
+      match (P.parse_partial text s, lexed s) with
+      | (Some _, [ d ]), Some tokens -> (
+          match Ins.parse_partial toks (Ins.input ~source:s tokens) with
+          | Some _, [ e ] ->
+              let found_at = String.length trivia + 1 in
+              let expected_labels =
+                if next && trivia <> "" then
+                  [ (P.Span.make ~start:found_at ~stop:(found_at + 1), "") ]
+                else []
+              in
+              D.span d = P.Span.point 1
+              && D.span e = D.span d
+              && D.message d = D.message e
+              && D.labels d = expected_labels
+              && D.labels e = D.labels d
+          | _ -> false)
+      | _ -> false)
+
+let between_or_insert =
+  Prop.test ~name:"between ~or_insert always passes; one error iff unclosed"
+    ~print:(fun (t1, t2, closed) ->
+      Printf.sprintf "(%S x %S closed=%b" t1 t2 closed)
+    Gen.(triple gen_trivia gen_trivia bool)
+    (fun (t1, t2, closed) ->
+      let s = "(" ^ t1 ^ "x" ^ t2 ^ if closed then ")" else "" in
+      let p =
+        P.between ~or_insert:true (Trivia.symbol "(") (Trivia.symbol ")")
+          (Trivia.symbol "x")
+      in
+      match P.parse_partial p s with
+      | Some "x", [] -> closed
+      | Some "x", [ d ] ->
+          (not closed)
+          && D.span d = P.Span.point (2 + String.length t1)
+          && D.labels d
+             = [
+                 ( P.Span.make ~start:0 ~stop:(1 + String.length t1),
+                   "opened here" );
+               ]
+      | _ -> false)
+
 let () =
   Prop.run "tokens"
     [
@@ -335,4 +425,6 @@ let () =
       language_agreement;
       lexer_error_comes_first;
       stack_safety;
+      insertion_point;
+      between_or_insert;
     ]
