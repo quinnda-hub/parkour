@@ -1,5 +1,83 @@
 {0 Parkour}
 
-Parkour is a parser-combinator library for human-authored text, with precise
-syntax errors and opt-in error recovery. It is in early development; see
-{!Parkour} for the (currently empty) API.
+Parkour is a parser-combinator library for human-authored text: configuration
+files, DSLs and small languages. Its aims are error messages that tell the user
+what is wrong and where, an API that reads well, opt-in error recovery, and
+robustness against hostile input. It depends on nothing beyond the OCaml
+standard library.
+
+{1 An example}
+
+{[
+open Parkour
+
+let assignment =
+  context "assignment"
+    (let+ name = take_while1 "identifier" is_letter
+     and+ () = skip_while is_space *> char '=' *> cut *> skip_while is_space
+     and+ value = integer in
+     (name, value))
+
+let () =
+  let input = "ammo = banana" in
+  match parse assignment input with
+  | Ok (name, n) -> Printf.printf "%s = %d\n" name n
+  | Error diagnostics ->
+      let source = Source.make ~name:"config.txt" input in
+      List.iter
+        (fun d -> print_string (Diagnostic.render source d))
+        diagnostics
+]}
+
+prints
+
+{v
+error: expected integer, found "banana"
+ --> config.txt:1:8
+  |
+1 | ammo = banana
+  |        ^^^^^^ expected integer
+  = while parsing assignment, from 1:1
+v}
+
+Diagnostics are also plain data ({!Parkour.Diagnostic}: span, expected, found,
+context, labels, notes), so editors and other tools can use them directly.
+
+{1 Features}
+
+- {b Error messages.} The failure that got furthest is reported, with what was
+  expected and what was found, secondary labels such as "opened here" for
+  unclosed brackets, and the constructs being parsed. {!Parkour.label},
+  {!Parkour.context}, {!Parkour.hidden}, {!Parkour.fail} and
+  {!Parkour.validate} shape the messages.
+- {b Explicit commitment.} Choice is ordered and backtracks by default;
+  {!Parkour.cut} commits once a construct is recognised and
+  {!Parkour.attempt} undoes it.
+- {b Error recovery}, opt-in: {!Parkour.recover}, {!Parkour.or_insert},
+  {!Parkour.skip_past} and {!Parkour.parse_partial} report many problems in one
+  run and still return a partial result.
+- {b Lexical conventions.} {!Parkour.Lexeme.make} builds whitespace, comment,
+  identifier and keyword parsers for a language; numbers, quoted strings and
+  JSON-style escapes are built in.
+- {b Token input.} {!Parkour.tokenize} and {!Parkour.Tokens} split parsing into
+  a lexer and a grammar over tokens, with diagnostics that still point into the
+  original text. {!Parkour.Make} accepts other kinds of input.
+- {b Expressions.} {!Parkour.expression} builds operator parsers from a
+  precedence table; {!Parkour.chainl1}, {!Parkour.sep_by} and
+  {!Parkour.between} cover the usual shapes.
+- {b UTF-8.} Diagnostics align underlines for wide and combining characters,
+  and {!Parkour.Utf8} parses Unicode scalars, reporting invalid bytes.
+- {b Robustness.} Repetitions are loops, so long inputs do not use the stack,
+  and nesting is limited ([max_depth]): deeply nested input is a
+  [nesting too deep] error, not a stack overflow.
+
+{1 Where to go next}
+
+- {{!page-tutorial}The tutorial} builds parsers step by step, with the error
+  output of each step.
+- {!Parkour} is the reference for every combinator, including the precise
+  semantics of commitment, error merging and recovery.
+- The [examples/] directory of the source tree has complete programs, each
+  printing a gallery of broken inputs: JSON, CSV, typed values, a calculator, an
+  INI-like configuration with recovery, and a small C-like language parsed both
+  directly from text and from tokens.

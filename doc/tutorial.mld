@@ -1,0 +1,733 @@
+{0 Tutorial}
+
+This tutorial builds parsers for small languages in steps, starting from a
+single assignment and ending with error recovery and token streams. Every
+snippet is complete OCaml and every error message shown is real output. The
+snippets are meant to be read in order: later ones reuse earlier definitions.
+
+{1 A first parser}
+
+Everything is in the top level of the {!Parkour} module. A parser is a value of
+type ['a Parkour.t]; {!Parkour.parse} runs it on a string and requires it to
+consume all of it. On failure you get a list of {!Parkour.Diagnostic.t}, which
+are data (position, expected, found, ...) that {!Parkour.Diagnostic.render}
+turns into a report against a {!Parkour.Source.t}.
+
+{[
+open Parkour
+
+let run show p input =
+  match parse p input with
+  | Ok v -> print_endline (show v)
+  | Error diagnostics ->
+      let source = Source.make ~name:"input" input in
+      List.iter
+        (fun d -> print_string (Diagnostic.render source d))
+        diagnostics
+
+let assignment =
+  let+ name = take_while1 "name" is_letter
+  and+ () = skip_while is_space *> char '=' *> skip_while is_space
+  and+ value = integer in
+  (name, value)
+
+let show (name, value) = Printf.sprintf "%s = %d" name value
+let () = run show assignment "ammo = 42"
+let () = run show assignment "ammo = banana"
+let () = run show assignment "ammo 42"
+]}
+
+{v
+ammo = 42
+error: expected integer, found "banana"
+ --> input:1:8
+  |
+1 | ammo = banana
+  |        ^^^^^^ expected integer
+error: expected '=', found "42"
+ --> input:1:6
+  |
+1 | ammo 42
+  |      ^^ expected '='
+v}
+
+Nothing in the grammar says what to report: each primitive knows what it
+expects ({!Parkour.integer} expects [integer], {!Parkour.char} expects the
+character), and the failure that got furthest into the input is the one shown.
+The name given to {!Parkour.take_while1} is what appears in messages when there
+is no such token.
+
+{1 Building blocks}
+
+Parsers are combined with [let+] and [and+] (several parsers in a row, as
+above), [*>] and [<*] (sequence, keep the right or left result), and [>>|] or
+{!Parkour.map} (transform the result). {!Parkour.many}, {!Parkour.sep_by} and
+the other repetitions produce lists, and {!Parkour.between} wraps a parser in
+delimiters:
+
+{[
+let list_of_ints =
+  between (char '[') (char ']') (sep_by ~sep:(char ',') integer)
+
+let show_list l = String.concat ";" (List.map string_of_int l)
+let () = run show_list list_of_ints "[1,2,3]"
+let () = run show_list list_of_ints "[1,2,3"
+]}
+
+{v
+1;2;3
+error: expected ',' or ']', found end of input
+ --> input:1:7
+  |
+1 | [1,2,3
+  | - opened here
+  |       ^ expected ',' or ']'
+v}
+
+The ["opened here"] label is added by {!Parkour.between} when the closing
+delimiter is missing, so an unclosed bracket points back to where it began.
+The error also shows that failures at the same position are merged: after an
+element, either [,] or [\]] could continue.
+
+{1 Whitespace and tokens}
+
+Spelling out whitespace by hand does not scale. {!Parkour.Lexeme.make} builds
+the parsers for a language's lexical conventions: comments, identifiers and
+reserved words. Each of its parsers skips the whitespace and comments that
+follow the token, so a grammar written with them never mentions whitespace,
+except to skip the leading space once:
+
+{[
+module L = (val Lexeme.make ~line_comments:[ "#" ] ())
+
+let assignment =
+  let+ name = L.identifier
+  and+ _ = L.symbol "="
+  and+ value = L.lexeme integer
+  and+ _ = L.symbol ";" in
+  (name, value)
+
+let program = L.space *> many assignment
+
+let show_program l =
+  String.concat ", " (List.map (fun (n, v) -> Printf.sprintf "%s=%d" n v) l)
+
+let () = run show_program program "ammo = 42; # rounds\n  health = 100;\n"
+let () = run show_program program "ammo = 42;\nhealth = ;\n"
+let () = run show_program program "ammo = 42;\nhealth = 100\n"
+]}
+
+{v
+ammo=42, health=100
+error: expected integer, found ';'
+ --> input:2:10
+  |
+2 | health = ;
+  |          ^ expected integer
+error: expected ';', found end of input
+ --> input:3:1
+  |
+3 |
+  | ^ expected ';'
+v}
+
+[L.symbol s] matches [s]; [L.keyword s] matches a whole word (so [keyword "if"]
+rejects [iffy]); [L.identifier] reads a name that is not in the [~reserved]
+list; [L.lexeme p] is any parser [p] followed by whitespace. {!Parkour.hidden}
+keeps a parser out of the [expected ...] lists, and is what makes the
+whitespace skipping invisible in messages.
+
+{1 Choice and commitment}
+
+[p <|> q] (or {!Parkour.choice}) is ordered like a PEG: [p] runs first, and if
+it fails, [q] runs from the same position, however much input [p] consumed. The
+first alternative that succeeds wins, and a later failure never goes back to try
+the other alternative differently.
+
+Backtracking freely has a cost, and it is that a mistake in one alternative can
+be explained away by another. In this language [let] is not reserved, so
+[let;] is a perfectly good call of a function named [let] (the module [L] is
+the one defined above):
+
+{[
+let semi = L.symbol ";"
+
+let declaration =
+  let+ _ = L.keyword "let"
+  and+ name = L.identifier
+  and+ _ = L.symbol "="
+  and+ n = L.lexeme integer
+  and+ _ = semi in
+  Printf.sprintf "declare %s = %d" name n
+
+let call =
+  let+ name = L.identifier and+ _ = semi in
+  "call " ^ name
+
+let statement = declaration <|> call
+let () = run Fun.id (L.space *> statement) "let 5;"
+let () = run Fun.id (L.space *> statement) "let;"
+]}
+
+{v
+error: expected identifier or ';', found '5'
+ --> input:1:5
+  |
+1 | let 5;
+  |     ^ expected identifier or ';'
+call let
+v}
+
+Neither answer is what the author meant. Once the parser has seen the keyword
+[let], it knows which construct is intended; {!Parkour.cut} commits to it. After
+a cut, the enclosing alternatives (and repetitions and options) can no longer
+backtrack past it, and a failure is reported as is:
+
+{[
+let declaration =
+  let+ _ = L.keyword "let" <* cut
+  and+ name = L.identifier
+  and+ _ = L.symbol "="
+  and+ n = L.lexeme integer
+  and+ _ = semi in
+  Printf.sprintf "declare %s = %d" name n
+
+let statement = declaration <|> call
+let () = run Fun.id (L.space *> statement) "let 5;"
+let () = run Fun.id (L.space *> statement) "let;"
+]}
+
+{v
+error: expected identifier, found '5'
+ --> input:1:5
+  |
+1 | let 5;
+  |     ^ expected identifier
+error: expected identifier, found ';'
+ --> input:1:4
+  |
+1 | let;
+  |    ^ expected identifier
+v}
+
+A good rule: put a [cut] right after the token that identifies a construct
+(a keyword, an opening bracket, the [=] of an assignment).
+
+{!Parkour.attempt} is the opposite: commitments made inside it do not escape,
+so enclosing alternatives may backtrack over it again. Use it sparingly, when a
+construct really has a committing prefix that is also valid on its own:
+
+{[
+let statement = attempt declaration <|> call
+let () = run Fun.id (L.space *> statement) "let;"
+]}
+
+{v
+call let
+v}
+
+Two combinators change how failures are described rather than how parsing goes.
+{!Parkour.label} replaces the expectations of a parser that fails without
+consuming input, and {!Parkour.context} records which construct was being
+parsed when something failed after its first token:
+
+{[
+let statement = declaration <|> call
+let () = run Fun.id (L.space *> statement) "5;"
+
+let statement = label "statement" (declaration <|> call)
+let () = run Fun.id (L.space *> statement) "5;"
+
+let statement = context "declaration" declaration <|> call
+let () = run Fun.id (L.space *> statement) "let x 5;"
+]}
+
+{v
+error: expected identifier or "let", found '5'
+ --> input:1:1
+  |
+1 | 5;
+  | ^ expected identifier or "let"
+error: expected statement, found '5'
+ --> input:1:1
+  |
+1 | 5;
+  | ^ expected statement
+error: expected '=', found '5'
+ --> input:1:7
+  |
+1 | let x 5;
+  |       ^ expected '='
+  = while parsing declaration, from 1:1
+v}
+
+{1 Recursion}
+
+A recursive grammar needs a way to refer to itself before it is defined.
+{!Parkour.fix} does it for one parser; for several that refer to each other use
+[let rec ... = lazy ...] and {!Parkour.force}:
+
+{[
+let rec value =
+  lazy
+    (choice ~label:"value"
+       [ (L.lexeme natural >>| string_of_int); force list ])
+
+and list =
+  lazy
+    (between (L.symbol "[") (L.symbol "]") (sep_by ~sep:(L.symbol ",") (force value))
+     >>| fun items -> "[" ^ String.concat " " items ^ "]")
+
+let () = run Fun.id (force value) "[1, [2, 3], []]"
+]}
+
+{v
+[1 [2 3] []]
+v}
+
+Repetitions are loops, so long inputs do not use the stack. Recursion does, once
+per level of nesting, so Parkour counts the entries into {!Parkour.fix},
+{!Parkour.delay} and {!Parkour.force}: past [max_depth] (default
+{!Parkour.default_max_depth}) the parse stops with a [nesting too deep] error
+instead of a stack overflow. Hostile input such as ten thousand opening
+brackets is therefore an ordinary error. The limit is an optional argument of
+{!Parkour.parse}.
+
+{1 Operators}
+
+{!Parkour.expression} builds an expression parser from a table of operators,
+listed from the tightest binding level to the loosest. Combined with
+{!Parkour.fix}, {!Parkour.between} and {!Parkour.sep_by}, a small expression
+language with function calls takes a page:
+
+{[
+type expr =
+  | Num of int
+  | Var of string
+  | Call of string * expr list
+  | Neg of expr
+  | Bin of string * expr * expr
+
+let rec show_expr = function
+  | Num n -> string_of_int n
+  | Var v -> v
+  | Call (f, args) -> f ^ "(" ^ String.concat ", " (List.map show_expr args) ^ ")"
+  | Neg e -> "-" ^ show_expr e
+  | Bin (op, a, b) -> "(" ^ show_expr a ^ " " ^ op ^ " " ^ show_expr b ^ ")"
+
+let operator op f = hidden (L.symbol op) <* cut >>| fun _ -> f
+let binary op = operator op (fun a b -> Bin (op, a, b))
+
+let expr =
+  fix (fun expr ->
+      let args =
+        between (L.symbol "(") (L.symbol ")") (sep_by ~sep:(L.symbol ",") expr)
+      in
+      let atom =
+        choice ~label:"expression"
+          [
+            (let+ n = L.lexeme natural in
+             Num n);
+            (let+ name = L.identifier and+ args = optional args in
+             match args with None -> Var name | Some args -> Call (name, args));
+            between (L.symbol "(") (L.symbol ")") expr;
+          ]
+      in
+      expression atom
+        [
+          [ Prefix (operator "-" (fun e -> Neg e)) ];
+          [ Infix_left (binary "*"); Infix_left (binary "/") ];
+          [ Infix_left (binary "+"); Infix_left (binary "-") ];
+        ])
+
+let full = L.space *> expr
+let () = run show_expr full "1 + 2 * x"
+let () = run show_expr full "-a * max(1, b + 2) - 3"
+let () = run show_expr full "(1 + 2"
+let () = run show_expr full "max(1, 2"
+let () = run show_expr full "1 + * 2"
+]}
+
+{v
+(1 + (2 * x))
+((-a * max(1, (b + 2))) - 3)
+error: expected ')', found end of input
+ --> input:1:7
+  |
+1 | (1 + 2
+  | - opened here
+  |       ^ expected ')'
+error: expected ')' or ',', found end of input
+ --> input:1:9
+  |
+1 | max(1, 2
+  |    - opened here
+  |         ^ expected ')' or ','
+error: expected expression, found '*'
+ --> input:1:5
+  |
+1 | 1 + * 2
+  |     ^ expected expression
+v}
+
+Two details make these messages good. The operators are {!Parkour.hidden}:
+after an operand the error should say what is missing (the [)]) rather than list
+every operator that could have continued the expression. And each operator has a
+[cut] after its token, so that in [1 + * 2] the error is the missing operand,
+not a [*] that was found where a [+] could have ended the expression. The
+{{!Parkour.operator}operator} type also has [Postfix], [Infix_right] and
+[Infix_none] (non-associative: [a < b < c] is rejected).
+
+{1 Custom errors}
+
+Not every mistake is a syntax error. {!Parkour.validate} checks the result of a
+parser, and the failure underlines everything the parser consumed:
+
+{[
+let port =
+  validate
+    (fun n -> if n < 1 || n > 65535 then Error "port out of range" else Ok n)
+    (L.lexeme natural)
+
+let setting =
+  let+ key = L.identifier and+ _ = L.symbol "=" <* cut and+ p = port in
+  (key, p)
+
+let show_setting (k, p) = Printf.sprintf "%s = %d" k p
+let () = run show_setting setting "port = 80"
+let () = run show_setting setting "port = 70000"
+]}
+
+{v
+port = 80
+error: port out of range
+ --> input:1:8
+  |
+1 | port = 70000
+  |        ^^^^^
+v}
+
+For anything else there is {!Parkour.fail}, with [~span] to underline something
+other than the current position, [~labels] for secondary spans, and [~notes] for
+hints. {!Parkour.spanned} supplies the spans:
+
+{[
+let name =
+  let* word, span = spanned L.identifier in
+  if List.mem word [ "if"; "let" ] then
+    fail ~span
+      ~notes:[ "reserved words cannot be used as names" ]
+      (Printf.sprintf "'%s' is a reserved word" word)
+  else return word
+
+let () = run Fun.id (L.space *> name) "let"
+
+let pair =
+  let* a, first = spanned L.identifier in
+  let* b, second = spanned L.identifier in
+  if a = b then
+    fail ~span:second ~labels:[ (first, "first defined here") ] "duplicate name"
+  else return (a ^ b)
+
+let () = run Fun.id pair "x x"
+]}
+
+{v
+error: 'let' is a reserved word
+ --> input:1:1
+  |
+1 | let
+  | ^^^
+  = note: reserved words cannot be used as names
+error: duplicate name
+ --> input:1:3
+  |
+1 | x x
+  | - first defined here
+  |   ^
+v}
+
+A custom message takes precedence over plain expectations at the same position,
+and [fail] does not commit.
+
+{1 Error recovery}
+
+By default parsing stops at the first error. Recovery is opt-in, for tools that
+want to report every problem in one run, and uses these pieces:
+
+- {!Parkour.recover} [~sync ~fallback p]: if [p] fails (by default only after a
+  [cut]), the error is recorded, the [sync] parser skips ahead to a safe place,
+  and [fallback] provides a placeholder value;
+- {!Parkour.skip_past} and {!Parkour.skip_to}: the usual [sync] parsers, which skip
+  to a terminator, optionally tracking nested delimiters with
+  [~nested:(open_, close)];
+- {!Parkour.or_insert}: for a missing terminator, records the error and carries
+  on as if the token were there, without skipping anything;
+- {!Parkour.parse_partial}: returns the value, if any, together with all the
+  diagnostics recorded. ({!Parkour.parse} returns [Error] whenever an error was
+  recorded.)
+
+A file of [key = value;] settings where every broken setting is reported and
+skipped:
+
+{[
+type value = Int of int | Str of string
+
+let value =
+  choice ~label:"value"
+    [
+      (let+ n = L.lexeme integer in
+       Int n);
+      (let+ s = L.lexeme string_literal in
+       Str s);
+    ]
+
+let setting =
+  let+ key = L.identifier
+  and+ _ = L.symbol "=" <* cut
+  and+ v = value
+  and+ _ = or_insert ";" (L.symbol ";") in
+  (key, v)
+
+let sync = skip_past ~nested:(char '{', char '}') (char ';') *> L.space
+
+let item =
+  recover ~catch:`Any ~sync ~fallback:(fun _ -> None) (setting >>| Option.some)
+
+let file = L.space *> many item <* eof
+
+let show_value = function
+  | Int n -> string_of_int n
+  | Str s -> Printf.sprintf "%S" s
+
+let input =
+  {|name = "demo";
+port = ;
+retries = 3
+debug = 1;
+= 5;
+|}
+
+let () =
+  let source = Source.make ~name:"demo.conf" input in
+  let result, diagnostics = parse_partial file input in
+  List.iter (fun d -> print_string (Diagnostic.render source d)) diagnostics;
+  List.iter
+    (function
+      | Some (k, v) -> Printf.printf "%s = %s\n" k (show_value v)
+      | None -> print_endline "(skipped)")
+    (Option.value result ~default:[])
+]}
+
+{v
+error: expected value, found ';'
+ --> demo.conf:2:8
+  |
+2 | port = ;
+  |        ^ expected value
+error: expected ';', found "debug"
+ --> demo.conf:3:12
+  |
+3 | retries = 3
+  |            ^ expected ';'
+4 | debug = 1;
+  | -----
+error: expected identifier, found '='
+ --> demo.conf:5:1
+  |
+5 | = 5;
+  | ^ expected identifier
+name = "demo"
+(skipped)
+retries = 3
+debug = 1
+(skipped)
+v}
+
+Note how the missing [;] is reported after [3], where it belongs, and
+[retries = 3] is still read: [or_insert] does not discard anything. [recover]
+has [~catch:`Any] here since no alternative should run for a broken setting;
+without it only failures after a [cut] are recovered. The number of recorded
+errors is capped by [~max_errors] (default 100), and parsing carries on to the
+end past the cap.
+
+{!Parkour.emit} records a diagnostic of your own and carries on. A warning does
+not make {!Parkour.parse} fail:
+
+{[
+let setting_with_warning =
+  let* key, span = spanned L.identifier in
+  let* () =
+    if key <> String.lowercase_ascii key then
+      emit (Diagnostic.make ~severity:`Warning ~span "keys should be lowercase")
+    else return ()
+  in
+  let+ _ = L.symbol "=" and+ v = value in
+  (key, v)
+
+let () =
+  let input = "Port = 80" in
+  let source = Source.make ~name:"demo.conf" input in
+  match parse_partial setting_with_warning input with
+  | Some (k, v), diagnostics ->
+      List.iter (fun d -> print_string (Diagnostic.render source d)) diagnostics;
+      Printf.printf "%s = %s\n" k (show_value v)
+  | None, _ -> ()
+]}
+
+{v
+warning: keys should be lowercase
+ --> demo.conf:1:1
+  |
+1 | Port = 80
+  | ^^^^
+Port = 80
+v}
+
+The documentation of {!Parkour.recover} has more guidance: put it around items
+that start with a [cut], use one at each nesting level of a block, and prefer
+[or_insert] for terminators. The [examples/] directory has two larger
+recovering parsers ([config.ml], [mini.ml]).
+
+{1 Token input}
+
+Large grammars are often easier in two steps: a lexer turns the text into
+tokens, then the grammar works on the tokens and never sees whitespace or
+comments. {!Parkour.tokenize} lexes with ordinary parsers (the [~skip] parser
+runs between tokens and is where whitespace goes), and {!Parkour.Tokens} gives
+the combinators over an array of tokens. Diagnostics still point into the
+original text, since every token carries its span:
+
+{[
+type tok = Num of int | Name of string | Sym of string
+
+module Tok = struct
+  type t = tok
+
+  let equal = ( = )
+
+  let show = function
+    | Num n -> string_of_int n
+    | Name s | Sym s -> s
+end
+
+module T = Parkour.Tokens (Tok)
+
+let lexer =
+  let token =
+    choice ~label:"token"
+      [
+        (let+ n = natural in
+         Num n);
+        (let+ s = take_while1 "name" is_letter in
+         Name s);
+        (let+ c = one_of "=+;" in
+         Sym (String.make 1 c));
+      ]
+  in
+  tokenize ~skip:(skip_while is_space) token
+
+let statement =
+  let open T in
+  let name = expect "name" (function Name s -> Some s | _ -> None) in
+  let num = expect "number" (function Num n -> Some n | _ -> None) in
+  let+ x = name
+  and+ _ = token (Sym "=")
+  and+ n = chainl1 num (token (Sym "+") *> return ( + ))
+  and+ _ = token (Sym ";") in
+  (x, n)
+
+let run_tokens text =
+  let source = Source.make ~name:"input" text in
+  let report ds =
+    List.iter (fun d -> print_string (Diagnostic.render source d)) ds
+  in
+  match lexer text with
+  | Error ds -> report ds
+  | Ok tokens -> (
+      match T.parse statement (T.input ~source:text tokens) with
+      | Ok (x, n) -> Printf.printf "%s = %d\n" x n
+      | Error ds -> report ds)
+
+let () = run_tokens "total = 1 + 2  +  39;"
+let () = run_tokens "total = 1 + ;"
+let () = run_tokens "total = 1 ? 2;"
+]}
+
+{v
+total = 42
+error: expected number, found ';'
+ --> input:1:13
+  |
+1 | total = 1 + ;
+  |             ^ expected number
+error: expected token or end of input, found '?'
+ --> input:1:11
+  |
+1 | total = 1 ? 2;
+  |           ^ expected token or end of input
+v}
+
+[examples/mini.ml] and [examples/mini_tokens.ml] parse the same small language
+both ways and print the same errors.
+
+{1 Performance notes}
+
+The defaults are fast enough for configuration files and small languages. A few
+habits keep larger grammars quick:
+
+- Prefer {!Parkour.dispatch} over {!Parkour.choice} when many alternatives start
+  with different tokens. [dispatch] looks at the next token and runs one parser
+  directly, instead of trying each alternative in turn. When the alternatives'
+  first tokens are disjoint it gives the same results and diagnostics as the
+  [choice] with the same label.
+- Skip whitespace after tokens with {!Parkour.Lexeme} (or a {!Parkour.hidden}
+  parser), not before each of them, so it is skipped exactly once.
+- Avoid wide {!Parkour.attempt}s: when what it wraps fails late, the next
+  alternative parses the same input again. Commit with {!Parkour.cut} and keep
+  [attempt] to the few tokens that decide.
+- Use {!Parkour.fold_many} or {!Parkour.skip_many} when the list of results is
+  not needed.
+
+{[
+type json = Str of string | Int of int | List of json list | Bool of bool
+
+let json =
+  fix (fun json ->
+      let list =
+        L.symbol "[" *> cut *> sep_by ~sep:(L.symbol ",") json
+        <* L.symbol "]"
+        >>| fun l -> List l
+      in
+      dispatch ~label:"value" (function
+        | '"' -> Some (L.lexeme string_literal >>| fun s -> Str s)
+        | '[' -> Some list
+        | 't' -> Some (L.keyword "true" >>| fun _ -> Bool true)
+        | '-' | '0' .. '9' -> Some (L.lexeme integer >>| fun n -> Int n)
+        | _ -> None))
+
+let rec show_json = function
+  | Str s -> Printf.sprintf "%S" s
+  | Int n -> string_of_int n
+  | Bool b -> string_of_bool b
+  | List l -> "[" ^ String.concat ", " (List.map show_json l) ^ "]"
+
+let () = run show_json (L.space *> json) {|[1, "two", [true]]|}
+let () = run show_json (L.space *> json) {|[1, ?]|}
+]}
+
+{v
+[1, "two", [true]]
+error: expected value, found '?'
+ --> input:1:5
+  |
+1 | [1, ?]
+  |     ^ expected value
+v}
+
+{1 Where next}
+
+The {!Parkour} module documents every combinator and states the semantics of
+commitment, error merging and recovery precisely. The [examples/] directory has
+complete programs with galleries of broken inputs: [json.ml], [csv.ml],
+[values.ml], [calc.ml], [config.ml] and the two [mini] variants.

@@ -1,0 +1,19 @@
+0.1.0 (unreleased)
+------------------
+
+Initial release.
+
+- Parser combinators over strings with ordered choice, explicit commitment
+  (cut, attempt), lookahead and the usual repetitions, all stack-safe.
+- Structured diagnostics (span, expected, found, context, labels, notes) and a
+  renderer with source excerpts, secondary labels, colours and wide-character
+  alignment.
+- Opt-in error recovery: recover, skip_to, skip_past, or_insert, emit,
+  parse_partial and max_errors.
+- Lexeme policies (whitespace, comments, identifiers, keywords), numbers,
+  quoted strings with escapes, and UTF-8 scalar parsers.
+- Operator-precedence expressions, chainl1/chainr1 and between with
+  "opened here" labels.
+- Token-stream input (tokenize, Tokens) and the Make functor for other inputs.
+- dispatch for choosing among many alternatives by the next token, and a
+  nesting-depth limit (max_depth).
