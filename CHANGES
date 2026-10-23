@@ -4,16 +4,28 @@
 Initial release.
 
 - Parser combinators over strings with ordered choice, explicit commitment
-  (cut, attempt), lookahead and the usual repetitions, all stack-safe.
+  (cut, attempt), lookahead and the usual repetitions (including sep_by and sep_end_by, each
+  in a 1 variant), all stack-safe.
 - Structured diagnostics (span, expected, found, context, labels, notes) and a
   renderer with source excerpts, secondary labels, colours and wide-character
   alignment.
 - Opt-in error recovery: recover, skip_to, skip_past, or_insert, emit,
-  parse_partial and max_errors.
-- Lexeme policies (whitespace, comments, identifiers, keywords), numbers,
-  quoted strings with escapes, and UTF-8 scalar parsers.
+  parse_partial and max_errors. Diagnostics recorded by a branch that is
+  abandoned (a failed alternative, a lookahead) are forgotten, and a missing
+  token is reported right after the previous token, before whitespace
+  (trivia).
+- Lexeme policies (whitespace, comments, identifiers, keywords; punct and kw
+  for the ones whose text is not needed), numbers, quoted strings with
+  escapes, and UTF-8 scalar parsers. Quoted and found text is shown with
+  control and bidirectional characters escaped.
+- hidden keeps a parser out of expected lists; trivia does the same and also
+  marks whitespace and comments for insertion points (space and whitespace
+  are trivia).
 - Operator-precedence expressions, chainl1/chainr1 and between with
   "opened here" labels.
-- Token-stream input (tokenize, Tokens) and the Make functor for other inputs.
+- Token-stream input (tokens, tokenize, Tokens) and the Make functor for other
+  inputs. token returns the token found in the input; tokens is the lexer as
+  a parser, so it can recover and be run with parse_partial.
 - dispatch for choosing among many alternatives by the next token, and a
-  nesting-depth limit (max_depth).
+  nesting-depth limit (max_depth) backed by a Stack_overflow backstop: where
+  OCaml raises Stack_overflow, the runners report it as "nesting too deep".

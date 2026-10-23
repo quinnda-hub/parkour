@@ -367,10 +367,14 @@ let () =
         (In_channel.with_open_bin path In_channel.input_all)
   | _ -> run ~name:"builtin.mini" ~full:true builtin
 
-(* Differences from mini.ml's gallery. Only one remains: the bad character.
-   Here the lexer reports "unexpected character '#'" and the parser's own
-   complaints at that token are dropped. In mini.ml the grammar sees the raw
-   character and can only say "expected ';', found '#'" (and, since the
-   statement is then skipped from the '#', a second error). Everything else,
-   including the wording of the messages and which statements are recovered,
-   is identical: both grammars have the same shape. *)
+(* Differences from mini.ml's gallery. Two remain, both in the lexer.
+   - A bad character. Here the lexer reports "unexpected character '#'" and the
+     parser's own complaints at that token are dropped. In mini.ml the grammar
+     sees the raw character and can only say "expected ';', found '#'" (and,
+     since the statement is then skipped from the '#', a second error).
+   - An unterminated string. The lexer commits after the opening '"', so the
+     "unterminated string" error stops the lexer: there are no tokens, hence no
+     parse and no further errors ("parsed: nothing"). In mini.ml the statement
+     is recovered from and parsing carries on after it.
+   Everything else, including the wording of the messages and which statements
+   are recovered, is identical: both grammars have the same shape. *)

@@ -56,11 +56,26 @@ end
     the same position, however much input [p] consumed. Choice is ordered: the
     first alternative that succeeds wins, and a later failure never revisits it.
 
-    {b Commitment with {!cut}.} Once a parser passes a [cut], the enclosing
-    alternatives, repetitions and options can no longer backtrack past it: a
-    failure after the cut is final and is reported as is. Use cuts once enough
-    input has been seen to know which construct is intended (after a keyword,
-    after [=]). {!attempt} undoes commitment for the parser it wraps.
+    {b Commitment with {!cut}.} Commitment is a property of a parser's result,
+    not a global mode. A parser that passes a [cut] is committed, whether it
+    then succeeds or fails, and commitment accumulates through sequencing: in
+    [a *> cut *> b] the whole is committed. The enclosing alternatives,
+    repetitions and options can then no longer backtrack past it: if the
+    committed parser fails, the failure is final and is reported as is (a [q] in
+    [p <|> q] is not tried, and the errors of earlier alternatives are
+    discarded). Commitment does not stop everything after the cut, though:
+    - Choices {e inside} the committed continuation still backtrack among
+      themselves: [cut *> (char 'x' <|> char 'a')] accepts ["a"].
+    - A [cut] does not clear the hints (what abandoned alternatives and stopped
+      repetitions would have accepted) gathered earlier in the sequence; they
+      still compete for the furthest failure.
+    - A [cut] around or before a {!recover} does not make the failures of the
+      parser it wraps committed {e for that} [recover]: only a [cut] inside the
+      wrapped parser counts.
+
+    Use cuts once enough input has been seen to know which construct is intended
+    (after a keyword, after [=]). {!attempt} undoes commitment for the parser it
+    wraps.
 
     {b Error reporting.} When parsing fails, Parkour reports the failure that
     got furthest into the input. Failures at the same position are combined:
@@ -72,15 +87,20 @@ end
 
     {b Termination and depth.} Repetitions are loops, so long inputs do not grow
     the stack. Each entry into a recursive parser ({!fix}, {!delay}, {!force})
-    counts towards [max_depth] (default {!default_max_depth}); exceeding it ends
-    the parse with a [nesting too deep (more than N levels)] error rather than a
-    stack overflow. The stack a level uses depends on the grammar, so as a
-    backstop the running functions ({!parse}, {!parse_partial}, {!parse_prefix})
-    also turn a [Stack_overflow] raised during the run into the diagnostic
+    counts towards [max_depth] (default {!default_max_depth}, the same on every
+    OCaml version); exceeding it ends the parse with a
+    [nesting too deep (more than N levels)] error. The limit counts levels of
+    recursion, but the stack a level uses depends on the grammar (a level with
+    many nested combinators uses more), so it cannot by itself rule out a stack
+    overflow. As a backstop the running functions ({!parse}, {!parse_partial},
+    {!parse_prefix}, and [tokenize] for text) also turn a [Stack_overflow]
+    raised during the run into the diagnostic
     [nesting too deep (stack exhausted after N levels)], [N] being the deepest
     nesting reached, at the position where that nesting was entered. This works
     where OCaml raises [Stack_overflow] (5.x, bytecode, and native code on Linux
-    and macOS for 4.14). Other exceptions escape the run. *)
+    and macOS for 4.14); there the result is a diagnostic either way, though
+    which of the two depends on the grammar and the stack size. Other exceptions
+    escape the run. *)
 module type S = sig
   type input
   type token
@@ -102,6 +122,9 @@ module type S = sig
     ('a, Diagnostic.t list) result
   (** [parse p input] runs [p] and requires it to consume the whole input. On
       failure the list is non-empty and ordered by position.
+
+      [max_depth] (default {!default_max_depth}) limits the nesting of recursive
+      parsers; see {e Termination and depth} above.
 
       Without {{!recovery} error recovery} there is exactly one diagnostic. With
       it, [Ok] is returned only if no error was recorded: recovering from an
@@ -219,12 +242,15 @@ module type S = sig
           | _ -> None)
       ]}
 
-      It is a fast path for {!choice} over many alternatives. When the
-      alternatives' first tokens are disjoint, each fails at its start position
-      on tokens outside its own, and each consumes input when it succeeds,
+      It is a fast path for {!choice} over many alternatives, which gives the
+      same results and diagnostics under these conditions: the alternatives'
+      first tokens are disjoint; on a token outside its own, each alternative
+      fails at its start position with an ordinary expectation failure and
+      without committing (not with {!fail} or another custom message, which
+      [choice] would report but [dispatch] never sees, and not after a {!cut});
+      and each consumes input when it succeeds. Then
       [choice ~label [p1; ...; pn]] and [dispatch ~label f] (with [f] sending
-      the first tokens of [pi] to [pi]) succeed and fail identically, with the
-      same diagnostics. *)
+      the first tokens of [pi] to [pi]) succeed and fail identically. *)
 
   val cut : unit t
   (** Consumes nothing; commits the current branch (see the semantics above). *)
@@ -265,9 +291,11 @@ module type S = sig
 
   val many_till : 'a t -> _ t -> 'a list t
   (** [many_till p stop] tries [stop], then [p], repeatedly, until [stop]
-      succeeds (consuming it). Fails if neither succeeds, reporting what both
-      expected. Raises [Grammar_error] if [p] succeeds without consuming input.
-  *)
+      succeeds (consuming it). If neither succeeds it fails, reporting what both
+      expected. If [stop] fails {e after committing} (it passed a {!cut}) that
+      failure is final: [p] is not tried, and only [stop]'s error is reported.
+      If [p] itself fails after committing, only [p]'s error is reported. Raises
+      [Grammar_error] if [p] succeeds without consuming input. *)
 
   val skip_many : _ t -> unit t
   val skip_many1 : _ t -> unit t
@@ -304,21 +332,31 @@ module type S = sig
   (** {1 Describing failures} *)
 
   val label : string -> 'a t -> 'a t
-  (** [label name p]: if [p] fails without consuming input, report
-      [expected name] instead of [p]'s own expectations. Failures deeper inside
-      [p] are reported unchanged, since they are more precise. This also applies
-      when [p] succeeds without consuming input: in
-      [label "items" (many item) *> char ';'] on ["x"], the error is
+  (** [label name p]: if [p] fails with an expectation failure
+      {e at the position where it started}, report [expected name] instead of
+      [p]'s own expectations. Failures deeper inside [p] are reported unchanged,
+      since they are more precise. What counts is where the failure is, not
+      whether [p] consumed input:
+      [label "pair" (lookahead (char 'a' *> char 'b'))] on ["ac"] consumes
+      nothing, but fails at the ['c'], so it reports [expected 'b'], and
+      likewise for an [optional] that rewound after failing deeper. This also
+      applies when [p] succeeds: expectations it left behind at its start
+      position (the hint of a repetition that stopped right away) are replaced
+      too. In [label "items" (many item) *> char ';'] on ["x"], the error is
       [expected items or ';']. Custom messages from {!fail} are never replaced.
   *)
 
   val hidden : 'a t -> 'a t
   (** [hidden p] keeps [p] out of [expected ...] lists, e.g. for an operator
       whose name the message need not list: when [p] succeeds it adds nothing to
-      later errors, and when it fails without consuming input it expects
-      nothing. Failures deeper inside [p] (say, an unterminated comment) are
-      reported unchanged. It does not mark what [p] consumed as trivia; for
-      whitespace and comments use {!trivia}. *)
+      later errors (any hint it carries is dropped), and when it fails with an
+      expectation failure {e at the position where it started} it expects
+      nothing (the message becomes [unexpected X] for the input found). Custom
+      failures from {!fail}, and failures deeper inside [p] (say, an
+      unterminated comment), are reported unchanged. As for {!label}, the
+      condition is the position of the failure, not whether [p] consumed input.
+      [hidden] does not mark what [p] consumed as trivia; for whitespace and
+      comments use {!trivia}. *)
 
   val trivia : 'a t -> 'a t
   (** [trivia p] hides [p] like {!hidden}, and when [p] succeeds having consumed
@@ -400,11 +438,18 @@ module type S = sig
       after it, or be written to fail on the longer one. Long chains of
       operators do not consume stack.
 
-      Put a {!cut} in operator parsers (after the operator's token): a missing
-      operand is then reported at the operand
-      ([expected expression, found ';']). Without it the operator is simply not
-      consumed, the expression ends before it, and the error shows up later at
-      the operator ([expected ';', found '-']). *)
+      Put a {!cut} in operator parsers (after the operator's token). Without it,
+      an operator whose operand is missing is simply not consumed: the
+      expression ends before the operator, and whatever follows gets to read the
+      operator itself. If the parse then fails anyway, the abandoned operand
+      failure is still among the hints, so the error often still names the
+      missing operand ([expected expression, found ';']) even without a cut. But
+      if something after the expression can accept the operator (an optional
+      [+], a postfix form in an enclosing parser), the parse succeeds and the
+      missing operand goes unreported; and {!recover} with the default
+      [~catch:`Committed] only handles committed failures. With a cut the
+      operator commits the expression, so the missing operand is a final,
+      committed failure at the operand. *)
 
   type 'a operator =
     | Prefix of ('a -> 'a) t
@@ -425,7 +470,8 @@ module type S = sig
       infix operators (each infix followed by an operand) are tried in table
       order. Hence commitment, backtracking and error merging behave exactly as
       for those combinators. An infix operator whose operand fails is not
-      consumed, so a [term] must not accept a tail that is also an operator.
+      consumed unless the operator parser committed (see above), so a [term]
+      must not accept a tail that is also an operator.
 
       The [operator cannot be chained] failure is reported where the expression
       ends, like {!validate}, and does not commit. *)
@@ -536,10 +582,11 @@ module type S = sig
   (** Like {!skip_to} but consumes the match of [stop]. *)
 
   val or_insert : 'a -> 'a t -> 'a t
-  (** [or_insert v p] is [p] if it succeeds. If [p] fails without committing and
-      without consuming input, the failure is recorded (e.g. [expected ';'] for
-      a missing semicolon) and [v] is the result, consuming nothing. Other
-      failures are unchanged.
+  (** [or_insert v p] is [p] if it succeeds. If [p] fails without committing,
+      {e at the position where it started} (a failure further in, even if [p]
+      then rewound, does not count), the failure is recorded (e.g.
+      [expected ';'] for a missing semicolon) and [v] is the result, consuming
+      nothing. Other failures are unchanged.
 
       The diagnostic points at the {e insertion point}, where the missing token
       belongs: an empty span right after the previous token, before any
@@ -722,25 +769,30 @@ module type TEXT = sig
 
       With [escape], a backslash starts an escape sequence: [escape] is run
       starting {e at the backslash} and its result replaces the sequence. If it
-      fails without committing, complaining at the backslash or the byte after
-      it, the failure becomes [invalid escape sequence], underlining the
-      backslash and the character after it. Other failures of [escape] are
-      reported unchanged. Without [escape], a backslash is an ordinary
-      character.
+      fails without committing, with an {e expectation} failure at the backslash
+      or the byte after it, the failure becomes [invalid escape sequence],
+      underlining the backslash and the character after it. Other failures of
+      [escape], including custom ones from {!fail}, are reported unchanged. The
+      escape parser must consume input when it succeeds: one that succeeds
+      without consuming raises {!Grammar_error} (it would repeat forever).
+      Without [escape], a backslash is an ordinary character.
 
       With [doubled] (default [false]), two quotes in a row inside the string
       stand for one [q], as in CSV: [quoted ~doubled:true] on a double quote
       reads two of them in a row as one double quote in the result. It combines
       with [escape].
 
-      A newline ([\n] or [\r]) or the end of input before the closing quote,
-      including right after a backslash, fails with [unterminated string],
-      underlining the string from its opening quote to that point. With
-      [multiline] (default [false]) raw newlines are part of the string instead,
-      and only the end of input is unterminated; the error is reported at the
-      end of input but underlines just the opening quote, since the rest of the
-      text is probably not meant to be a string. Never commits, and leaves no
-      hint. *)
+      A newline ([\n] or [\r]) or the end of input before the closing quote
+      fails with [unterminated string], underlining the string from its opening
+      quote to that point. A backslash is no exception to this, except that the
+      escape parser sees whatever follows it: a newline right after a backslash
+      is given to [escape], which rejects it (so {!json_escape} reports
+      [invalid escape sequence] there), and only the end of input right after a
+      backslash is [unterminated string]. With [multiline] (default [false]) raw
+      newlines are part of the string instead, and only the end of input is
+      unterminated; the error is reported at the end of input but underlines
+      just the opening quote, since the rest of the text is probably not meant
+      to be a string. Never commits, and leaves no hint. *)
 
   val json_escape : string t
   (** A JSON escape sequence starting at its backslash: a backslash followed by
@@ -816,8 +868,11 @@ module type TEXT = sig
           [--[[ ... ]]] work together.
         - [nested_comments]: whether block comments nest (default [false]).
         - [newlines]: whether newlines count as whitespace (default [true]).
-          When [false], {!S.space} stops before ['\n'] and ['\r'], so a grammar
-          can treat them as separators.
+          When [false], {!S.space} stops before ['\n'] and ['\r'] in the
+          whitespace between comments, so a grammar can treat them as
+          separators. Newlines inside a block comment are still part of the
+          comment and are consumed with it (a line comment still stops before
+          its newline).
         - [ident_start], [ident_char]: identifier characters (defaults
           [[A-Za-z_]] and [[A-Za-z0-9_]]).
         - [reserved]: words that {!S.identifier} rejects (default none).

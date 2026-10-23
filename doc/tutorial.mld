@@ -135,9 +135,16 @@ v}
 [()], for punctuation whose text is not needed (hence [and+ () = ...] above).
 [L.keyword s] matches a whole word (so [keyword "if"] rejects [iffy]), and
 [L.kw s] is its [()] counterpart. [L.identifier] reads a name that is not in the
-[~reserved] list; [L.lexeme p] is any parser [p] followed by whitespace. {!Parkour.hidden} keeps a parser out of
-the [expected ...] lists, and is what makes the whitespace skipping invisible in
-messages.
+[~reserved] list; [L.lexeme p] is any parser [p] followed by whitespace.
+
+Two combinators keep a parser out of messages. {!Parkour.hidden} removes a
+parser from the [expected ...] lists. {!Parkour.trivia} does the same and also
+remembers what the parser consumed as whitespace or comments, so that a missing
+token can be reported right after the previous token rather than after the
+space (see {!Parkour.or_insert} under error recovery below). [L.space] and
+{!Parkour.whitespace} are [trivia]; use [trivia] too for a whitespace parser of
+your own, and [hidden] for anything meaningful that merely need not be listed,
+such as an operator.
 
 {1 Choice and commitment}
 
@@ -183,7 +190,9 @@ v}
 Neither answer is what the author meant. Once the parser has seen the keyword
 [let], it knows which construct is intended; {!Parkour.cut} commits to it. After
 a cut, the enclosing alternatives (and repetitions and options) can no longer
-backtrack past it, and a failure is reported as is:
+backtrack past it, and a failure is reported as is. (Commitment belongs to the
+parser that crossed the cut and accumulates through sequencing; choices
+{e inside} what follows the cut still backtrack among themselves.)
 
 {[
 let declaration =
@@ -229,8 +238,8 @@ call let
 v}
 
 Two combinators change how failures are described rather than how parsing goes.
-{!Parkour.label} replaces the expectations of a parser that fails without
-consuming input, and {!Parkour.context} records which construct was being
+{!Parkour.label} replaces the expectations of a parser that fails at its
+starting position (a failure deeper inside is more precise and stays), and {!Parkour.context} records which construct was being
 parsed when something failed after its first token:
 
 {[
@@ -290,10 +299,13 @@ v}
 Repetitions are loops, so long inputs do not use the stack. Recursion does, once
 per level of nesting, so Parkour counts the entries into {!Parkour.fix},
 {!Parkour.delay} and {!Parkour.force}: past [max_depth] (default
-{!Parkour.default_max_depth}) the parse stops with a [nesting too deep] error
-instead of a stack overflow. Hostile input such as ten thousand opening
-brackets is therefore an ordinary error. The limit is an optional argument of
-{!Parkour.parse}.
+{!Parkour.default_max_depth}) the parse stops with a [nesting too deep] error.
+Hostile input such as ten thousand opening brackets is therefore an ordinary
+error. The limit is an optional argument of {!Parkour.parse} and the other
+runners. How much stack a level needs depends on the grammar, so the runners
+also catch a [Stack_overflow] and report it as
+[nesting too deep (stack exhausted ...)]; if your grammar needs deep nesting,
+raise [max_depth] and test it with deep input.
 
 {1 Operators}
 
@@ -375,8 +387,12 @@ v}
 Two details make these messages good. The operators are {!Parkour.hidden}:
 after an operand the error should say what is missing (the [)]) rather than list
 every operator that could have continued the expression. And each operator has a
-[cut] after its token, so that in [1 + * 2] the error is the missing operand,
-not a [*] that was found where a [+] could have ended the expression. The
+[cut] after its token. Without it, an operator with a missing operand (the [+]
+in [1 + * 2]) would just be given back and the expression would end before it;
+the error often still names the operand, because the abandoned failure is kept
+as a hint, but whatever follows the expression could then accept the [+], and
+[recover] would not treat the failure as committed. With the cut, a missing
+operand is a final error at the operand. The
 {{!Parkour.operator}operator} type also has [Postfix], [Infix_right] and
 [Infix_none] (non-associative: [a < b < c] is rejected).
 
@@ -549,7 +565,14 @@ v}
 Note how the missing [;] is reported after [3], where it belongs, and
 [retries = 3] is still read: [or_insert] does not discard anything. [recover]
 has [~catch:`Any] here since no alternative should run for a broken setting;
-without it only failures after a [cut] are recovered. The number of recorded
+without it only failures after a [cut] are recovered.
+
+One hazard to know: [recover] records the furthest error and runs [sync] from
+there, and the furthest error can belong to an alternative or repetition that
+was abandoned after reading past the end of the broken item. Then [sync] starts
+beyond the item's terminator and skips the next item too. The remedy is the
+usual one: put a [cut] after the token that identifies each item (here the
+[=]), so that nothing is read past a broken item before it fails. The number of recorded
 errors is capped by [~max_errors] (default 100), and parsing carries on to the
 end past the cap.
 
@@ -598,7 +621,11 @@ tokens, then the grammar works on the tokens and never sees whitespace or
 comments. {!Parkour.tokenize} lexes with ordinary parsers (the [~skip] parser
 runs between tokens and is where whitespace goes), and {!Parkour.Tokens} gives
 the combinators over an array of tokens. Diagnostics still point into the
-original text, since every token carries its span:
+original text, since every token carries its span. ({!Parkour.val-tokens} is the
+same lexer as a parser, for lexing with recovery: wrap the token parser in
+{!Parkour.recover}, with a placeholder token as the fallback, and run it with
+{!Parkour.parse_partial}, which returns the tokens together with the
+diagnostics, where [tokenize] would return only the errors.)
 
 {[
 type tok = Num of int | Name of string | Sym of string
@@ -681,9 +708,11 @@ habits keep larger grammars quick:
 - Prefer {!Parkour.dispatch} over {!Parkour.choice} when many alternatives start
   with different tokens. [dispatch] looks at the next token and runs one parser
   directly, instead of trying each alternative in turn. When the alternatives'
-  first tokens are disjoint it gives the same results and diagnostics as the
-  [choice] with the same label.
-- Skip whitespace after tokens with {!Parkour.Lexeme} (or a {!Parkour.hidden}
+  first tokens are disjoint and each fails there with an ordinary expectation
+  (no {!Parkour.fail} and no {!Parkour.cut} before the first token is consumed)
+  it gives the same results and diagnostics as the [choice] with the same
+  label; see {!Parkour.dispatch} for the exact conditions.
+- Skip whitespace after tokens with {!Parkour.Lexeme} (or a {!Parkour.trivia}
   parser), not before each of them, so it is skipped exactly once.
 - Avoid wide {!Parkour.attempt}s: when what it wraps fails late, the next
   alternative parses the same input again. Commit with {!Parkour.cut} and keep

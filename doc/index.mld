@@ -69,7 +69,8 @@ context, labels, notes), so editors and other tools can use them directly.
   and {!Parkour.Utf8} parses Unicode scalars, reporting invalid bytes.
 - {b Robustness.} Repetitions are loops, so long inputs do not use the stack,
   and nesting is limited ([max_depth]): deeply nested input is a
-  [nesting too deep] error, not a stack overflow.
+  [nesting too deep] error. Where OCaml can raise [Stack_overflow], the
+  runners also turn that into the same kind of error.
 
 {1 Where to go next}
 
