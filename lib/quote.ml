@@ -30,7 +30,7 @@ let literal s =
     let m = multibyte_len s !i in
     if m > 0 then begin
       let code = Decode.code (Decode.decode s !i) in
-      if is_bidi code then Buffer.add_string b (Printf.sprintf "\\u{%X}" code)
+      if is_bidi code then Buffer.add_string b (Printf.sprintf "\\u{%04X}" code)
       else Buffer.add_substring b s !i m;
       i := !i + m
     end
