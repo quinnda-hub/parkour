@@ -194,6 +194,31 @@ module type S = sig
   (** [choice [p1; ...; pn]] is [p1 <|> ... <|> pn], labelled if [label] is
       given. [choice []] always fails. *)
 
+  val dispatch : label:string -> (token -> 'a t option) -> 'a t
+  (** [dispatch ~label f] picks the parser from the next token without trying
+      alternatives: if [f t] is [Some p] for the next token [t], it runs [p]; if
+      it is [None], or the input has ended, it fails at the current position
+      with no expectations. The whole is labelled [label] (see {!label}), so
+      that failure reads "expected <label>, found ...". Nothing is consumed by
+      looking at the token.
+
+      {[
+      let value =
+        dispatch ~label:"value" (function
+          | '"' -> Some string_literal
+          | '[' -> Some array
+          | '{' -> Some object_
+          | '-' | '0' .. '9' -> Some number
+          | _ -> None)
+      ]}
+
+      It is a fast path for {!choice} over many alternatives. When the
+      alternatives' first tokens are disjoint, each fails at its start position
+      on tokens outside its own, and each consumes input when it succeeds,
+      [choice ~label [p1; ...; pn]] and [dispatch ~label f] (with [f] sending
+      the first tokens of [pi] to [pi]) succeed and fail identically, with the
+      same diagnostics. *)
+
   val cut : unit t
   (** Consumes nothing; commits the current branch (see the semantics above). *)
 

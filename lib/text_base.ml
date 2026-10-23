@@ -34,7 +34,7 @@ let any_char = any
 
 let string lit =
   let n = String.length lit in
-  let items = [ Expected.Literal lit ] in
+  let kind = expect_kind [ Expected.Literal lit ] in
   let rec matches s pos i =
     i >= n
     || String.unsafe_get s (pos + i) = String.unsafe_get lit i
@@ -42,7 +42,7 @@ let string lit =
   in
   fun st pos ->
     if pos + n <= st.len && matches st.input pos 0 then pass lit (pos + n)
-    else fail_at pos items
+    else fail_kind pos kind
 
 let scan pred s pos =
   let n = String.length s in
@@ -67,10 +67,10 @@ let take_while ?label pred st pos =
     }
 
 let take_while1 name pred =
-  let items = [ Expected.Label name ] in
+  let kind = expect_kind [ Expected.Label name ] in
   fun st pos ->
     let stop = scan pred st.input pos in
-    if stop = pos then fail_at pos items
+    if stop = pos then fail_kind pos kind
     else pass (String.sub st.input pos (stop - pos)) stop
 
 let skip_while ?label pred st pos =
@@ -92,10 +92,7 @@ let custom_fail pos ~start ~stop message =
         {
           pos;
           kind = Custom { code = None; message };
-          span = Some (Span.make ~start ~stop);
-          context = [];
-          labels = [];
-          notes = [];
+          extra = { no_extra with span = Some (Span.make ~start ~stop) };
         };
       cut = false;
     }
@@ -116,24 +113,25 @@ let letter = satisfy "letter" is_letter
 let hex_digit = satisfy "hexadecimal digit" is_hex_digit
 
 let one_of chars =
-  let items =
-    List.sort_uniq Expected.compare
-      (List.init (String.length chars) (fun i ->
-           Expected.Literal (String.make 1 chars.[i])))
+  let kind =
+    expect_kind
+    @@ List.sort_uniq Expected.compare
+         (List.init (String.length chars) (fun i ->
+              Expected.Literal (String.make 1 chars.[i])))
   in
   fun st pos ->
     if pos < st.len && String.contains chars (String.unsafe_get st.input pos)
     then pass (String.unsafe_get st.input pos) (pos + 1)
-    else fail_at pos items
+    else fail_kind pos kind
 
 let none_of chars st pos =
   if
     pos < st.len && not (String.contains chars (String.unsafe_get st.input pos))
   then pass (String.unsafe_get st.input pos) (pos + 1)
-  else fail_at pos []
+  else fail_kind pos nothing_expected
 
 let newline =
-  let items = [ Expected.Label "newline" ] in
+  let kind = expect_kind [ Expected.Label "newline" ] in
   fun st pos ->
     if pos < st.len then
       match String.unsafe_get st.input pos with
@@ -141,14 +139,14 @@ let newline =
       | '\r'
         when pos + 1 < st.len && String.unsafe_get st.input (pos + 1) = '\n' ->
           pass () (pos + 2)
-      | _ -> fail_at pos items
-    else fail_at pos items
+      | _ -> fail_kind pos kind
+    else fail_kind pos kind
 
 let whitespace = hidden (skip_while is_space)
 
 let string_ci lit =
   let n = String.length lit in
-  let items = [ Expected.Literal lit ] in
+  let kind = expect_kind [ Expected.Literal lit ] in
   let lit = String.lowercase_ascii lit in
   let rec matches s pos i =
     i >= n
@@ -159,7 +157,7 @@ let string_ci lit =
   fun st pos ->
     if pos + n <= st.len && matches st.input pos 0 then
       pass (String.sub st.input pos n) (pos + n)
-    else fail_at pos items
+    else fail_kind pos kind
 
 let consumed p st pos =
   match p st pos with
@@ -203,26 +201,47 @@ let number_end ~int ~neg s pos =
   if e = d then pos else if int then e else scan_exponent s (scan_fraction s e)
 
 let number_token name ~int ~neg convert message =
-  let items = [ Expected.Label name ] in
+  let kind = expect_kind [ Expected.Label name ] in
   fun st pos ->
     let stop = number_end ~int ~neg st.input pos in
-    if stop = pos then fail_at pos items
+    if stop = pos then fail_kind pos kind
     else
-      match convert (String.sub st.input pos (stop - pos)) with
+      match convert st.input pos stop with
       | Some v -> pass v stop
       | None -> custom_fail stop ~start:pos ~stop message
 
+(* The int denoted by [s.[i] .. s.[stop - 1]], digits (as [int_of_string_opt]
+   reads them) negated if [negative], once [acc] has been accumulated from the
+   digits before [i]; or [None] if it is out of range. The digits are
+   accumulated as a negative number, since [min_int] has no positive
+   counterpart. *)
+let rec int_digits s stop negative i acc =
+  if i >= stop then
+    if negative then Some acc else if acc = min_int then None else Some (-acc)
+  else
+    let d = Char.code (String.unsafe_get s i) - Char.code '0' in
+    let shifted = acc * 10 in
+    (* [acc * 10] has not wrapped iff [acc >= min_int / 10]; then the
+       subtraction is checked against [min_int] directly. *)
+    if acc < min_int / 10 || shifted < min_int + d then None
+    else int_digits s stop negative (i + 1) (shifted - d)
+
+(* The int of the token [s.[start] .. s.[stop - 1]]: an optional '-' and
+   decimal digits. *)
+let int_of_token s start stop =
+  if s.[start] = '-' then int_digits s stop true (start + 1) 0
+  else int_digits s stop false start 0
+
 let natural =
-  number_token "integer" ~int:true ~neg:false int_of_string_opt
+  number_token "integer" ~int:true ~neg:false int_of_token
     "integer out of range"
 
 let integer =
-  number_token "integer" ~int:true ~neg:true int_of_string_opt
-    "integer out of range"
+  number_token "integer" ~int:true ~neg:true int_of_token "integer out of range"
 
 let number =
   number_token "number" ~int:false ~neg:true
-    (fun s ->
-      let f = float_of_string s in
+    (fun s start stop ->
+      let f = float_of_string (String.sub s start (stop - start)) in
       if Float.is_finite f then Some f else None)
     "number out of range"

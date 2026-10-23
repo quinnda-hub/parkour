@@ -71,6 +71,61 @@ module Parkour_json = struct
                 ds))
 end
 
+(* ---- Parkour with [dispatch]: the same grammar, choosing the value by its
+   first character instead of trying each alternative ---- *)
+
+module Parkour_dispatch_json = struct
+  open Parkour
+
+  let ws = whitespace
+  let lexeme p = p <* ws
+  let sym c = lexeme (char c)
+  let str = lexeme string_literal
+  let num = lexeme number
+
+  let rec value =
+    lazy
+      (dispatch ~label:"value" (function
+        | 'n' -> Some (lexeme (string "null") *> return Null)
+        | 't' -> Some (lexeme (string "true") *> return (Bool true))
+        | 'f' -> Some (lexeme (string "false") *> return (Bool false))
+        | '-' | '0' .. '9' -> Some (num >>| fun n -> Number n)
+        | '"' -> Some (str >>| fun s -> String s)
+        | '[' -> Some (force array)
+        | '{' -> Some (force obj)
+        | _ -> None))
+
+  and array =
+    lazy
+      (context "array"
+         ( between (sym '[') (sym ']')
+             (cut *> sep_by ~sep:(sym ',') (force value))
+         >>| fun items -> Array items ))
+
+  and obj =
+    lazy
+      (let member =
+         let+ key = str <* sym ':' and+ v = force value in
+         (key, v)
+       in
+       context "object"
+         ( between (sym '{') (sym '}') (cut *> sep_by ~sep:(sym ',') member)
+         >>| fun members -> Object members ))
+
+  let json = ws *> force value
+
+  let parse src =
+    match parse json src with
+    | Ok v -> Ok v
+    | Error ds ->
+        let source = Source.make ~name:"input" src in
+        Error
+          (String.concat "\n"
+             (List.map
+                (fun d -> Format.asprintf "%a" (Diagnostic.pp_located source) d)
+                ds))
+end
+
 (* ---- Angstrom, in the style of its RFC 7159 example ---- *)
 
 module Angstrom_json = struct
@@ -293,10 +348,11 @@ module Menhir_json = struct
     | exception Json_parser.Error -> Error (where () ^ ": syntax error")
 end
 
-(* New Parkour variants (say, one using [dispatch]) are extra rows here. *)
+(* New Parkour variants are extra rows here. *)
 let all : (string * (string -> (Json_ast.t, string) result)) list =
   [
     ("parkour", Parkour_json.parse);
+    ("parkour-dispatch", Parkour_dispatch_json.parse);
     ("angstrom", Angstrom_json.parse);
     ("mparser", Mparser_json.parse);
     ("yojson+convert", Yojson_json.parse);

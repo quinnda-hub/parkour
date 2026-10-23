@@ -285,20 +285,49 @@ let roundtrips =
 let gen_digits lo hi =
   Gen.string_size ~gen:(Gen.char_range '0' '9') (Gen.int_range lo hi)
 
+(* [p] on [tok ^ rest] agrees with [int_of_string_opt tok]. *)
+let agrees_with_int_of_string p tok rest =
+  let n = String.length tok in
+  match (int_of_string_opt tok, run p (tok ^ rest)) with
+  | Some v, V (v', pos) -> v = v' && pos = n
+  | None, r -> custom "integer out of range" 0 n r
+  | Some _, E _ -> false
+
 let int_range_prop =
   Prop.test ~name:"integer / natural out of range: message, token span"
     ~print:(fun (neg, d, rest) -> Printf.sprintf "%b %s %S" neg d rest)
     Gen.(triple bool (gen_digits 1 24) (oneof_list [ ""; " x"; ".5" ]))
     (fun (neg, d, rest) ->
       let tok = (if neg then "-" else "") ^ d in
-      let check p tok =
-        let n = String.length tok in
-        match (int_of_string_opt tok, run p (tok ^ rest)) with
-        | Some v, V (v', pos) -> v = v' && pos = n
-        | None, r -> custom "integer out of range" 0 n r
-        | Some _, E _ -> false
+      agrees_with_int_of_string P.integer tok rest
+      && agrees_with_int_of_string P.natural d rest)
+
+(* Digit strings near [max_int] and [min_int] (one digit changed, some leading
+   zeros), where an accumulating parser could go wrong by one. *)
+let int_boundary_prop =
+  let gen_near =
+    Gen.(
+      let* base = oneof_list [ max_int; min_int; max_int / 10; min_int / 10 ] in
+      let digits =
+        let s = string_of_int base in
+        if base < 0 then String.sub s 1 (String.length s - 1) else s
       in
-      check P.integer tok && check P.natural d)
+      let* i = int_range 0 (String.length digits - 1) in
+      let* d = char_range '0' '9' in
+      let* zeros = int_range 0 2 in
+      let bytes = Bytes.of_string digits in
+      Bytes.set bytes i d;
+      return
+        ( base < 0,
+          String.make zeros '0' ^ Bytes.to_string bytes,
+          if base < 0 then "-" else "" ))
+  in
+  Prop.test ~name:"integer / natural near the int boundaries: int_of_string_opt"
+    ~print:(fun (_, d, sign) -> sign ^ d)
+    gen_near
+    (fun (_, d, sign) ->
+      agrees_with_int_of_string P.integer (sign ^ d) ""
+      && agrees_with_int_of_string P.natural d "")
 
 let float_range_prop =
   Prop.test ~name:"number out of range: message, token span"
@@ -759,6 +788,7 @@ let () =
     @ roundtrips
     @ [
         int_range_prop;
+        int_boundary_prop;
         float_range_prop;
         string_roundtrip;
         string_unterminated;

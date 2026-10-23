@@ -9,10 +9,7 @@ let invalid_error pos =
   {
     pos;
     kind = Custom { code = None; message = invalid_message };
-    span = Some (Span.make ~start:pos ~stop:(pos + 1));
-    context = [];
-    labels = [];
-    notes = [];
+    extra = { no_extra with span = Some (Span.make ~start:pos ~stop:(pos + 1)) };
   }
 
 let invalid_fail pos = Fail { error = invalid_error pos; cut = false }

@@ -20,13 +20,19 @@ module Make (I : INPUT) = struct
     | Expect of { items : expectations; unexpected : int option }
     | Custom of { code : string option; message : string }
 
-  type error = {
-    pos : int;  (** input index; the key for furthest-failure merging *)
-    kind : kind;
+  (* What most errors do not have, in one block so that the common error is
+     small: a plain expectation failure shares [no_extra]. *)
+  type extra = {
     span : Span.t option;  (** display span of a [Custom] error *)
     context : (string * int) list;  (** outermost first; start indices *)
     labels : (Span.t * string) list;  (** secondary labels, source spans *)
     notes : string list;
+  }
+
+  type error = {
+    pos : int;  (** input index; the key for furthest-failure merging *)
+    kind : kind;
+    extra : extra;
   }
 
   (* The constructs being parsed (see [context]), innermost first. One block
@@ -67,15 +73,15 @@ module Make (I : INPUT) = struct
 
   (* Errors *)
 
+  let no_extra = { span = None; context = []; labels = []; notes = [] }
+
+  (* The kind of a failure expecting [items]. Build it once, when the parser
+     is built, rather than on every failure. *)
+  let expect_kind items = Expect { items = Items items; unexpected = None }
+  let nothing_expected = expect_kind []
+
   let expect_error pos items =
-    {
-      pos;
-      kind = Expect { items = Items items; unexpected = None };
-      span = None;
-      context = [];
-      labels = [];
-      notes = [];
-    }
+    { pos; kind = expect_kind items; extra = no_extra }
 
   let flatten e =
     let rec go acc = function
@@ -93,23 +99,33 @@ module Make (I : INPUT) = struct
     if a.pos > b.pos then a
     else if b.pos > a.pos then b
     else
-      let context = if a.context <> [] then a.context else b.context in
-      let labels = if a.labels <> [] then a.labels else b.labels in
-      let notes = if a.notes <> [] then a.notes else b.notes in
+      let first l m = match l with [] -> m | _ -> l in
+      let context = first a.extra.context b.extra.context in
+      let with_context e =
+        if context == e.extra.context then e
+        else { e with extra = { e.extra with context } }
+      in
       match (a.kind, b.kind) with
-      | Custom _, _ -> { a with context }
-      | _, Custom _ -> { b with context }
+      | Custom _, _ -> with_context a
+      | _, Custom _ -> with_context b
       | Expect x, Expect y ->
           let unexpected =
             match x.unexpected with None -> y.unexpected | u -> u
           in
+          let extra =
+            if a.extra == no_extra && b.extra == no_extra then no_extra
+            else
+              {
+                span = None;
+                context;
+                labels = first a.extra.labels b.extra.labels;
+                notes = first a.extra.notes b.extra.notes;
+              }
+          in
           {
             pos = a.pos;
             kind = Expect { items = Union (x.items, y.items); unexpected };
-            span = None;
-            context;
-            labels;
-            notes;
+            extra;
           }
 
   let join h1 h2 =
@@ -118,9 +134,16 @@ module Make (I : INPUT) = struct
     | Some a, Some b -> Some (merge a b)
 
   let with_hint hint e = match hint with None -> e | Some h -> merge h e
-  let keep pos = function Some h when h.pos >= pos -> Some h | _ -> None
+  let keep pos = function Some h as hint when h.pos >= pos -> hint | _ -> None
+
+  (* [keep pos (join h1 h2)], without merging hints that are dropped anyway. *)
+  let keep_join pos h1 h2 = join (keep pos h1) (keep pos h2)
   let pass value pos = Pass { value; pos; cut = false; hint = None }
-  let fail_at pos items = Fail { error = expect_error pos items; cut = false }
+
+  let fail_kind pos kind =
+    Fail { error = { pos; kind; extra = no_extra }; cut = false }
+
+  let fail_at pos items = fail_kind pos (expect_kind items)
 
   let source_span st start stop =
     if stop <= start then Span.point (I.span st.input start).start
@@ -146,12 +169,12 @@ module Make (I : INPUT) = struct
     let context =
       List.rev_map
         (fun (name, start) -> (name, source_span st start e.pos))
-        e.context
+        e.extra.context
     in
     let expected_diagnostic expected =
       let found, span = found_at st e.pos in
-      Diagnostic.make ~expected ~found ~context ~labels:e.labels ~notes:e.notes
-        ~span
+      Diagnostic.make ~expected ~found ~context ~labels:e.extra.labels
+        ~notes:e.extra.notes ~span
         (expected_message expected found)
     in
     match e.kind with
@@ -159,18 +182,19 @@ module Make (I : INPUT) = struct
         match (flatten items, unexpected) with
         | [], Some stop when stop > e.pos ->
             let found = I.describe st.input e.pos stop in
-            Diagnostic.make ~found ~context ~labels:e.labels ~notes:e.notes
+            Diagnostic.make ~found ~context ~labels:e.extra.labels
+              ~notes:e.extra.notes
               ~span:(source_span st e.pos stop)
               ("unexpected " ^ found)
         | expected, _ -> expected_diagnostic expected)
     | Custom { code; message } ->
         let span =
-          match e.span with
+          match e.extra.span with
           | Some s -> s
           | None -> Span.point (I.span st.input e.pos).start
         in
-        Diagnostic.make ?code ~context ~labels:e.labels ~notes:e.notes ~span
-          message
+        Diagnostic.make ?code ~context ~labels:e.extra.labels
+          ~notes:e.extra.notes ~span message
 
   (* The diagnostic for an error that is being recovered from: the active
      enclosing contexts that started before the error, then the error's own
@@ -181,7 +205,12 @@ module Make (I : INPUT) = struct
       | Frame (name, start, rest) ->
           enclosing (if start < e.pos then (name, start) :: acc else acc) rest
     in
-    to_diagnostic st { e with context = enclosing [] st.frames @ e.context }
+    to_diagnostic st
+      {
+        e with
+        extra =
+          { e.extra with context = enclosing [] st.frames @ e.extra.context };
+      }
 
   (* The source offset of input index [pos]. *)
   let offset st pos = (I.span st.input (min pos st.len)).start
@@ -266,10 +295,7 @@ module Make (I : INPUT) = struct
           {
             pos;
             kind = Custom { code; message };
-            span;
-            context = [];
-            labels;
-            notes;
+            extra = { no_extra with span; labels; notes };
           };
         cut = false;
       }
@@ -293,7 +319,7 @@ module Make (I : INPUT) = struct
                 value = k a.value b.value;
                 pos = b.pos;
                 cut = a.cut || b.cut;
-                hint = keep b.pos (join a.hint b.hint);
+                hint = keep_join b.pos a.hint b.hint;
               }
         | Fail b ->
             Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut })
@@ -310,7 +336,7 @@ module Make (I : INPUT) = struct
                 value = b.value;
                 pos = b.pos;
                 cut = a.cut || b.cut;
-                hint = keep b.pos (join a.hint b.hint);
+                hint = keep_join b.pos a.hint b.hint;
               }
         | Fail b ->
             Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut })
@@ -334,7 +360,9 @@ module Make (I : INPUT) = struct
                 value = b.value;
                 pos = b.pos;
                 cut = false;
-                hint = keep b.pos (join (Some a.error) b.hint);
+                hint =
+                  (if a.error.pos < b.pos then b.hint
+                   else keep_join b.pos (Some a.error) b.hint);
               }
         | Fail b when not b.cut ->
             Fail { error = merge a.error b.error; cut = false }
@@ -345,15 +373,10 @@ module Make (I : INPUT) = struct
   (* [label] describes a failure at its start position by its name, whatever
      the failure said (unless it is a custom message). *)
   let label name p =
+    let described = expect_kind [ Expected.Label name ] in
     let relabel e =
       match e.kind with
-      | Expect _ ->
-          {
-            e with
-            kind =
-              Expect
-                { items = Items [ Expected.Label name ]; unexpected = None };
-          }
+      | Expect _ -> { e with kind = described }
       | Custom _ -> e
     in
     fun st pos ->
@@ -393,19 +416,30 @@ module Make (I : INPUT) = struct
      construct that failed on its first token was never really entered (that
      case is [label]'s job). Frames are pushed while unwinding, so the list
      ends up outermost first. *)
+  let add_frame name pos e =
+    if e.pos > pos then
+      {
+        e with
+        extra = { e.extra with context = (name, pos) :: e.extra.context };
+      }
+    else e
+
   let context name p st pos =
-    let add e =
-      if e.pos > pos then { e with context = (name, pos) :: e.context } else e
-    in
     let frames = st.frames in
     st.frames <- Frame (name, pos, frames);
     let reply = p st pos in
     st.frames <- frames;
     match reply with
     | Pass ({ hint = Some h; _ } as r) ->
-        Pass { value = r.value; pos = r.pos; cut = r.cut; hint = Some (add h) }
+        Pass
+          {
+            value = r.value;
+            pos = r.pos;
+            cut = r.cut;
+            hint = Some (add_frame name pos h);
+          }
     | Pass _ as r -> r
-    | Fail r -> Fail { error = add r.error; cut = r.cut }
+    | Fail r -> Fail { error = add_frame name pos r.error; cut = r.cut }
 
   let validate ?code check p st pos =
     match p st pos with
@@ -418,10 +452,7 @@ module Make (I : INPUT) = struct
               {
                 pos = r.pos;
                 kind = Custom { code; message };
-                span = Some (source_span st pos r.pos);
-                context = [];
-                labels = [];
-                notes = [];
+                extra = { no_extra with span = Some (source_span st pos r.pos) };
               }
             in
             Fail { error = with_hint r.hint e; cut = r.cut })
@@ -454,34 +485,52 @@ module Make (I : INPUT) = struct
     | Fail r when r.cut -> Fail { r with cut = false }
     | r -> r
 
-  (* Same as folding [alt], but iterative. *)
+  (* Same as folding [alt], but iterative. The failures of the alternatives
+     tried so far are kept as a list, newest first, of those at the furthest
+     position (all that [merge] would keep); they are merged, oldest first,
+     only when the result needs them. A success usually starts past the
+     failures, which are then dropped without having been merged. *)
+  let merge_all errs =
+    match errs with
+    | [] -> assert false
+    | [ e ] -> e
+    | [ later; earlier ] -> merge earlier later
+    | _ -> (
+        match List.rev errs with
+        | [] -> assert false
+        | e :: rest -> List.fold_left merge e rest)
+
+  (* [go] is a top-level function, not a closure made on each call. *)
+  let rec choice_go st pos log errors furthest errs = function
+    | [] ->
+        let error =
+          match errs with [] -> expect_error pos [] | _ -> merge_all errs
+        in
+        Fail { error; cut = false }
+    | p :: rest -> (
+        match p st pos with
+        | Pass r when not r.cut -> (
+            match errs with
+            | [] -> Pass r
+            | _ when furthest < r.pos -> Pass r
+            | _ ->
+                Pass
+                  {
+                    r with
+                    hint = keep_join r.pos (Some (merge_all errs)) r.hint;
+                  })
+        | Fail r when not r.cut ->
+            restore st log errors;
+            let e = r.error in
+            if e.pos > furthest then
+              choice_go st pos log errors e.pos [ e ] rest
+            else if e.pos = furthest then
+              choice_go st pos log errors furthest (e :: errs) rest
+            else choice_go st pos log errors furthest errs rest
+        | r -> r)
+
   let choice ?label:name ps =
-    let p st pos =
-      let rec go log errors err = function
-        | [] ->
-            let error =
-              match err with Some e -> e | None -> expect_error pos []
-            in
-            Fail { error; cut = false }
-        | p :: rest -> (
-            match p st pos with
-            | Pass r when not r.cut -> (
-                match err with
-                | None -> Pass r
-                | Some e ->
-                    Pass { r with hint = keep r.pos (join (Some e) r.hint) })
-            | Fail r when not r.cut ->
-                restore st log errors;
-                go log errors
-                  (Some
-                     (match err with
-                     | None -> r.error
-                     | Some e -> merge e r.error))
-                  rest
-            | r -> r)
-      in
-      go st.log st.errors None ps
-    in
+    let p st pos = choice_go st pos st.log st.errors (-1) [] ps in
     match name with None -> p | Some name -> label name p
 
   (* Repetition. Each loop is tail-recursive. An uncommitted failure ends the
@@ -495,27 +544,21 @@ module Make (I : INPUT) = struct
              at position %d, so it would repeat forever"
             name pos))
 
-  let fold_loop name f init p st pos0 =
-    let rec go acc pos cut hint =
-      let log = st.log and errors = st.errors in
-      match p st pos with
-      | Pass r ->
-          if r.pos = pos then zero_width name pos;
-          go (f acc r.value) r.pos (cut || r.cut)
-            (keep r.pos (join hint r.hint))
-      | Fail r when r.cut -> Fail { error = with_hint hint r.error; cut = true }
-      | Fail r ->
-          restore st log errors;
-          Pass
-            {
-              value = acc;
-              pos;
-              cut;
-              hint = keep pos (join hint (Some r.error));
-            }
-    in
-    go init pos0 false None
+  (* [fold_go] is a top-level function, not a closure made on each call. *)
+  let rec fold_go name f p st acc pos cut hint =
+    let log = st.log and errors = st.errors in
+    match p st pos with
+    | Pass r ->
+        if r.pos = pos then zero_width name pos;
+        fold_go name f p st (f acc r.value) r.pos (cut || r.cut)
+          (keep_join r.pos hint r.hint)
+    | Fail r when r.cut -> Fail { error = with_hint hint r.error; cut = true }
+    | Fail r ->
+        restore st log errors;
+        Pass
+          { value = acc; pos; cut; hint = keep pos (join hint (Some r.error)) }
 
+  let fold_loop name f init p st pos0 = fold_go name f p st init pos0 false None
   let cons acc x = x :: acc
   let many p = map List.rev (fold_loop "many" cons [] p)
 
@@ -553,13 +596,13 @@ module Make (I : INPUT) = struct
                 hint = keep pos (join hint (Some r.error));
               }
         | Pass s -> (
-            let cut = cut || s.cut and hint = keep s.pos (join hint s.hint) in
+            let cut = cut || s.cut and hint = keep_join s.pos hint s.hint in
             let log = st.log and errors = st.errors in
             match p st s.pos with
             | Pass r ->
                 if r.pos = pos then zero_width name pos;
                 go (r.value :: acc) r.pos (cut || r.cut)
-                  (keep r.pos (join hint r.hint))
+                  (keep_join r.pos hint r.hint)
             | Fail r when r.cut ->
                 Fail { error = with_hint hint r.error; cut = true }
             | Fail r ->
@@ -588,7 +631,7 @@ module Make (I : INPUT) = struct
           match p st pos with
           | Pass r ->
               go (i - 1) (r.value :: acc) r.pos (cut || r.cut)
-                (keep r.pos (join hint r.hint))
+                (keep_join r.pos hint r.hint)
           | Fail r ->
               Fail { error = with_hint hint r.error; cut = cut || r.cut }
       in
@@ -606,7 +649,7 @@ module Make (I : INPUT) = struct
               value = List.rev acc;
               pos = s.pos;
               cut = cut || s.cut;
-              hint = keep s.pos (join hint s.hint);
+              hint = keep_join s.pos hint s.hint;
             }
       | Fail s when s.cut -> Fail { error = with_hint hint s.error; cut = true }
       | Fail s -> (
@@ -616,7 +659,7 @@ module Make (I : INPUT) = struct
               if r.pos = pos then zero_width "many_till" pos;
               let hint = if r.cut then hint else join hint (Some s.error) in
               go (r.value :: acc) r.pos (cut || r.cut)
-                (keep r.pos (join hint r.hint))
+                (keep_join r.pos hint r.hint)
           | Fail r when r.cut ->
               Fail { error = with_hint hint r.error; cut = true }
           | Fail r ->
@@ -629,8 +672,10 @@ module Make (I : INPUT) = struct
 
   (* Lookahead and position *)
 
+  let end_expected = expect_kind [ Expected.End_of_input ]
+
   let eof st pos =
-    if pos >= st.len then pass () pos else fail_at pos [ Expected.End_of_input ]
+    if pos >= st.len then pass () pos else fail_kind pos end_expected
 
   let lookahead p st pos =
     let log = st.log and errors = st.errors in
@@ -653,10 +698,7 @@ module Make (I : INPUT) = struct
               {
                 pos;
                 kind = Expect { items = Items []; unexpected = Some r.pos };
-                span = None;
-                context = [];
-                labels = [];
-                notes = [];
+                extra = no_extra;
               };
             cut = false;
           }
@@ -697,26 +739,41 @@ module Make (I : INPUT) = struct
 
   (* Tokens *)
 
-  let expect name f st pos =
-    if pos < st.len then
-      match f (I.get st.input pos) with
-      | Some v -> pass v (pos + 1)
-      | None -> fail_at pos [ Expected.Label name ]
-    else fail_at pos [ Expected.Label name ]
+  let expect name f =
+    let kind = expect_kind [ Expected.Label name ] in
+    fun st pos ->
+      if pos < st.len then
+        match f (I.get st.input pos) with
+        | Some v -> pass v (pos + 1)
+        | None -> fail_kind pos kind
+      else fail_kind pos kind
 
-  let satisfy name pred st pos =
-    if pos < st.len && pred (I.get st.input pos) then
-      pass (I.get st.input pos) (pos + 1)
-    else fail_at pos [ Expected.Label name ]
+  let satisfy name pred =
+    let kind = expect_kind [ Expected.Label name ] in
+    fun st pos ->
+      if pos < st.len && pred (I.get st.input pos) then
+        pass (I.get st.input pos) (pos + 1)
+      else fail_kind pos kind
 
   let token t =
-    let items = [ Expected.Literal (I.show t) ] in
+    let kind = expect_kind [ Expected.Literal (I.show t) ] in
     fun st pos ->
       if pos < st.len && I.equal (I.get st.input pos) t then pass t (pos + 1)
-      else fail_at pos items
+      else fail_kind pos kind
+
+  (* [label name (peek >>= ...)] without the bind: nothing is committed or
+     hinted by looking at the token, so the chosen parser's reply is the reply. *)
+  let dispatch ~label:name f =
+    label name (fun st pos ->
+        if pos < st.len then
+          match f (I.get st.input pos) with
+          | Some p -> p st pos
+          | None -> fail_kind pos nothing_expected
+        else fail_kind pos nothing_expected)
 
   let any st pos =
-    if pos < st.len then pass (I.get st.input pos) (pos + 1) else fail_at pos []
+    if pos < st.len then pass (I.get st.input pos) (pos + 1)
+    else fail_kind pos nothing_expected
 
   let peek st pos =
     pass (if pos < st.len then Some (I.get st.input pos) else None) pos
@@ -850,10 +907,7 @@ module Make (I : INPUT) = struct
             {
               pos = stop;
               kind = Custom { code = None; message = chained_message };
-              span = Some span;
-              context = [];
-              labels = [];
-              notes = [];
+              extra = { no_extra with span = Some span };
             }
           in
           Fail { error = with_hint hint e; cut }
@@ -943,6 +997,13 @@ module Make (I : INPUT) = struct
         pass default pos
     | r -> r
 
+  (* The "opened here" label of a delimited construct that opened at [pos]
+     and whose opener ended at [stop], if its body consumed anything. *)
+  let opened st pos stop body_stop =
+    if stop > pos && body_stop > stop then
+      [ (source_span st pos stop, "opened here") ]
+    else []
+
   let between ?(or_insert = false) o c p st pos =
     match o st pos with
     | Fail _ as r -> r
@@ -952,13 +1013,8 @@ module Make (I : INPUT) = struct
             Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut }
         | Pass b -> (
             let cut = a.cut || b.cut in
-            let hint = keep b.pos (join a.hint b.hint) in
+            let hint = keep_join b.pos a.hint b.hint in
             let log = st.log and errors = st.errors in
-            let opened () =
-              if a.pos > pos && b.pos > a.pos then
-                [ (source_span st pos a.pos, "opened here") ]
-              else []
-            in
             match c st b.pos with
             | Pass d ->
                 Pass
@@ -966,20 +1022,28 @@ module Make (I : INPUT) = struct
                     value = b.value;
                     pos = d.pos;
                     cut = cut || d.cut;
-                    hint = keep d.pos (join hint d.hint);
+                    hint = keep_join d.pos hint d.hint;
                   }
             | Fail { error; cut = false } when or_insert && error.pos = b.pos ->
                 restore st log errors;
                 record
                   ~found:(Some (offset st error.pos))
                   st
-                  (insertion_diagnostic st error (opened ()));
+                  (insertion_diagnostic st error (opened st pos a.pos b.pos));
                 Pass { value = b.value; pos = b.pos; cut; hint = None }
             | Fail d ->
                 let error = with_hint hint d.error in
                 let error =
                   if d.error.pos >= error.pos then
-                    { error with labels = error.labels @ opened () }
+                    {
+                      error with
+                      extra =
+                        {
+                          error.extra with
+                          labels =
+                            error.extra.labels @ opened st pos a.pos b.pos;
+                        };
+                    }
                   else error
                 in
                 Fail { error; cut = cut || d.cut }))

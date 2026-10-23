@@ -396,6 +396,83 @@ let between_opened_here =
           else []
       | Error _ -> false)
 
+(* e. dispatch *)
+
+(* Everything observable: the value and position, or all the diagnostics. *)
+let obs_full_diag p s =
+  match P.parse_prefix p s with
+  | Ok r -> `Ok r
+  | Error ds -> `Error ds
+  | exception P.Grammar_error m -> `Grammar_error m
+
+(* Each of 'a', 'b', 'c' maps to a generated parser or to nothing. *)
+let gen_dispatch =
+  let g = Gen.option ~ratio:0.25 (G.gen ~cuts:true) in
+  Gen.(
+    pair
+      (pair (oneof_list [ "value"; "item" ]) (tup3 g g g))
+      (pair (oneof_list [ ""; "a"; "ab"; "b"; "ca" ]) G.gen_input))
+
+let print_dispatch ((name, (a, b, c)), (prefix, s)) =
+  let show = function None -> "-" | Some g -> G.to_string g in
+  Printf.sprintf "%s: a=%s b=%s c=%s on %S%S" name (show a) (show b) (show c)
+    prefix s
+
+let table (a, b, c) ch =
+  Option.map G.compile
+    (match ch with 'a' -> a | 'b' -> b | 'c' -> c | _ -> None)
+
+(* [p] followed by a failure, so that [p]'s success hints are reported. *)
+let then_z p = P.(p <* char 'z')
+
+let dispatch_definition =
+  Prop.test ~name:"dispatch: agrees with its definition" ~print:print_dispatch
+    gen_dispatch (fun ((name, gs), (prefix, s)) ->
+      let f = table gs in
+      let d = P.dispatch ~label:name f in
+      let reference =
+        P.(
+          label name
+            ( peek >>= function
+              | Some t -> ( match f t with Some p -> p | None -> choice [])
+              | None -> choice [] ))
+      in
+      (* Alone, and after something that consumes (the failure position, the
+         enclosing context and the hints it can carry all differ). *)
+      let wrap p = P.(context "wrap" (string prefix *> p)) in
+      let input = prefix ^ s in
+      List.for_all
+        (fun (a, b) -> obs_full_diag a input = obs_full_diag b input)
+        [
+          (d, reference);
+          (wrap d, wrap reference);
+          (* a failure after it shows the hints a success leaves *)
+          (then_z d, then_z reference);
+        ])
+
+(* Alternatives that each start with their own token are the case where
+   [dispatch] is a faster [choice ~label]. *)
+let dispatch_is_choice =
+  Prop.test ~name:"dispatch: equals choice ~label on disjoint first tokens"
+    ~print:print_dispatch gen_dispatch (fun ((name, gs), (prefix, s)) ->
+      let f = table gs in
+      let alternative ch = Option.map (fun p -> P.(char ch *> p)) (f ch) in
+      let alternatives = List.filter_map alternative [ 'a'; 'b'; 'c' ] in
+      let dispatch =
+        P.dispatch ~label:name (fun ch ->
+            Option.map (fun p -> P.(char ch *> p)) (f ch))
+      in
+      let choice = P.choice ~label:name alternatives in
+      let wrap p = P.(context "wrap" (string prefix *> p)) in
+      let input = prefix ^ s in
+      List.for_all
+        (fun (a, b) -> obs_full_diag a input = obs_full_diag b input)
+        [
+          (dispatch, choice);
+          (wrap dispatch, wrap choice);
+          (then_z dispatch, then_z choice);
+        ])
+
 let () =
   Prop.run "engine"
     ([ outcomes_agree; errors_agree ~cuts:false; errors_agree ~cuts:true ]
@@ -412,4 +489,6 @@ let () =
         codes;
         fail_annotations;
         between_opened_here;
+        dispatch_definition;
+        dispatch_is_choice;
       ])
