@@ -1,6 +1,6 @@
 open Parkour
 module Prop = Parkour_test_support.Prop
-module Quote = Private.Quote
+module Quote = Parkour_test_support.Quote
 open QCheck2
 
 (* Generators *)
@@ -24,6 +24,9 @@ let fragments =
     "\xc3\xa9";
     "\xe6\x97\xa5";
     "\xf0\x9f\x99\x82";
+    "\xe2\x80\xae";
+    "\xe2\x81\xa7";
+    "\xd8\x9c";
     "\xff";
     "\x80";
     "\xe6\x97";
@@ -93,6 +96,13 @@ let unescape body =
             Buffer.add_char b
               (Char.chr (int_of_string ("0x" ^ String.sub body (i + 2) 2)));
             go (i + 4)
+        | 'u' ->
+            let close = String.index_from body i '}' in
+            let code =
+              int_of_string ("0x" ^ String.sub body (i + 3) (close - i - 3))
+            in
+            Buffer.add_utf_8_uchar b (Uchar.of_int code);
+            go (close + 1)
         | _ -> failwith "bad escape"
   in
   go 0;
@@ -165,6 +175,30 @@ let literal_roundtrip =
     ~print:print_string gen_string (fun s ->
       let q = Quote.literal s in
       unescape (String.sub q 1 (String.length q - 2)) = s)
+
+let is_bidi c =
+  c = 0x061C || c = 0x200E || c = 0x200F
+  || (0x202A <= c && c <= 0x202E)
+  || (0x2066 <= c && c <= 0x2069)
+
+let no_bidi =
+  Prop.test ~name:"Quote: no bidi control scalar in any quoted output"
+    ~print:print_string gen_string (fun s ->
+      let clean q =
+        let d = ref true in
+        String.iteri
+          (fun i _ ->
+            let u = String.get_utf_8_uchar q i in
+            if
+              Uchar.utf_decode_is_valid u
+              && is_bidi (Uchar.to_int (Uchar.utf_decode_uchar u))
+            then d := false)
+          q;
+        !d
+      in
+      clean (Quote.literal s)
+      && (s = "" || clean (fst (Quote.found s 0)))
+      && (s = "" || clean (Quote.range s 0 (String.length s))))
 
 let found_gen =
   Gen.(
@@ -281,6 +315,7 @@ let () =
       expected_order;
       literal_shape;
       literal_roundtrip;
+      no_bidi;
       found_props;
       range_props;
       diag_props;

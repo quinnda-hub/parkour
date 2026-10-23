@@ -111,10 +111,3 @@ module Tokens (T : TOKEN) : sig
 end
 
 include TEXT
-
-(**/**)
-
-(** Internals exposed for Parkour's own tests. Not part of the API. *)
-module Private : sig
-  module Quote = Quote
-end

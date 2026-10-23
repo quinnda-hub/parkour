@@ -76,7 +76,8 @@ let errors_agree ~cuts =
               | Some m, _ -> P.Diagnostic.message d = m
               | None, Some stop when stop > f.pos ->
                   P.Diagnostic.message d
-                  = "unexpected " ^ P.Private.Quote.range s f.pos stop
+                  = "unexpected "
+                    ^ Parkour_test_support.Quote.range s f.pos stop
                   && sp.stop = stop
                   && P.Diagnostic.expected d = []
               | None, _ ->

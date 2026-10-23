@@ -126,7 +126,7 @@ let json_escape =
                          (0x10000 + ((hi - 0xD800) lsl 10) + (lo - 0xDC00)))
                       stop2
                 | Some _ -> bad_unicode i stop2
-                | None -> bad_unicode i stop))
+                | None -> bad_unicode i stop2))
       | _ -> fail_at (i + 1) items
 
 let string_literal = quoted ~escape:json_escape '"'

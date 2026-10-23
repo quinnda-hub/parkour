@@ -14,9 +14,11 @@ val literal : string -> string
     (A lone apostrophe is double-quoted, like a lone double quote is
     single-quoted, so neither needs escaping.) Escaped: newline, tab and
     carriage return as [\n], [\t], [\r]; backslash; the active quote character;
-    other control bytes and invalid UTF-8 bytes as a lowercase [\xNN]. Printable
-    ASCII and well-formed UTF-8 are kept verbatim. The empty string is quoted
-    with double quotes. *)
+    other control bytes and invalid UTF-8 bytes as a lowercase [\xNN];
+    bidirectional control scalars (U+061C, U+200E, U+200F, U+202A-U+202E,
+    U+2066-U+2069) as [\u{XXXX}] in uppercase hex. Printable ASCII and
+    well-formed UTF-8 are kept verbatim. The empty string is quoted with double
+    quotes. *)
 
 val found : string -> int -> string * int
 (** [found s i], for [0 <= i < String.length s], describes the input at byte [i]

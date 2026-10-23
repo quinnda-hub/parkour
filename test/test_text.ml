@@ -440,7 +440,7 @@ let string_bad_unicode =
                ("\\n", 6);
                ("\\u0041", 12);
                ("\\ud800", 12);
-               ("\\u12\"", 6);
+               ("\\u12\"", 10);
              ]);
       ]
   in
@@ -451,6 +451,18 @@ let string_bad_unicode =
       let start = 1 + String.length (json_text body) in
       custom "invalid unicode escape" start (start + len)
         (run P.string_literal ("\"" ^ json_text body ^ text)))
+
+let string_bad_second_surrogate =
+  Prop.test ~name:"string_literal: malformed second \\u underlines both escapes"
+    ~print:(fun (n, h) -> Printf.sprintf "%04X + %S" n h)
+    Gen.(
+      pair (int_range 0xd800 0xdbff)
+        (string_size ~gen:(oneof_list [ '0'; '7'; 'a'; 'F' ]) (int_range 0 3)))
+    (fun (n, h) ->
+      let text = Printf.sprintf "\\u%04X\\u%s" n h in
+      custom "invalid unicode escape" 1
+        (7 + 2 + String.length h)
+        (run P.string_literal ("\"" ^ text ^ "x\"")))
 
 let quoted_without_escape =
   Prop.test ~name:"quoted without escape copies raw bytes" ~print:pp_bytes
@@ -815,6 +827,7 @@ let () =
         string_unterminated;
         string_bad_escape;
         string_bad_unicode;
+        string_bad_second_surrogate;
         quoted_without_escape;
         quoted_options;
         space_prop flat "flat";

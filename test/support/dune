@@ -1,3 +1,7 @@
+(copy_files# ../../lib/quote.ml{,i})
+
+(copy_files# ../../lib/decode.ml{,i})
+
 (library
  (name parkour_test_support)
  (libraries parkour qcheck-core qcheck-core.runner))

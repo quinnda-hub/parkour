@@ -94,7 +94,7 @@ module Lexer = struct
         word;
         (let+ n = natural in
          Number n);
-        (let+ s = string_literal in
+        (let+ s = lookahead (char '"') *> cut *> string_literal in
          Text s);
         symbol;
         (let+ c = any_char in

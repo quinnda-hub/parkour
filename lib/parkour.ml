@@ -13,7 +13,3 @@ module type TOKEN = Parkour_intf.TOKEN
 module Make = Engine.Make
 module Tokens = Tokens.Make
 include Text
-
-module Private = struct
-  module Quote = Quote
-end
