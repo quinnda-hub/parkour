@@ -1,9 +1,7 @@
 (* Length of the well-formed multi-byte scalar at [i], or 0. *)
 let multibyte_len s i =
-  let d = String.get_utf_8_uchar s i in
-  if Uchar.utf_decode_is_valid d && Uchar.utf_decode_length d >= 2 then
-    Uchar.utf_decode_length d
-  else 0
+  let d = Decode.decode s i in
+  if Decode.code d >= 0 && Decode.length d >= 2 then Decode.length d else 0
 
 let is_ascii_word c =
   (c >= 'a' && c <= 'z')

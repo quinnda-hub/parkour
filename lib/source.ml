@@ -61,11 +61,11 @@ let check t offset =
 let count_chars text from upto =
   let chars = ref 0 and utf16 = ref 0 and i = ref from in
   while !i < upto do
-    let d = Width.decode text !i in
-    let l = Width.length d in
+    let d = Decode.decode text !i in
+    let l = Decode.length d in
     if !i + l <= upto then begin
       incr chars;
-      utf16 := !utf16 + if Width.code d >= 0x10000 then 2 else 1
+      utf16 := !utf16 + if Decode.code d >= 0x10000 then 2 else 1
     end;
     i := !i + l
   done;
@@ -98,7 +98,7 @@ let offset t ~line ~column =
   let stop = line_stop t starts (line - 1) in
   let i = ref starts.(line - 1) and c = ref (column - 1) in
   while !c > 0 && !i < stop do
-    i := !i + min (Width.length (Width.decode t.text !i)) (stop - !i);
+    i := !i + min (Decode.length (Decode.decode t.text !i)) (stop - !i);
     decr c
   done;
   !i

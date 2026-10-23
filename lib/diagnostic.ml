@@ -112,9 +112,9 @@ let is_odd c =
 let iter_cells text ~tab_width start stop f =
   let i = ref start and col = ref 0 in
   while !i < stop do
-    let d = Width.decode text !i in
-    let len = min (Width.length d) (stop - !i) in
-    let code = Width.code d in
+    let d = Decode.decode text !i in
+    let len = min (Decode.length d) (stop - !i) in
+    let code = Decode.code d in
     let width =
       if code = 9 then tab_width - (!col mod tab_width)
       else if code < 0 || code < 0x20 || code = 0x7f || is_odd code then 1

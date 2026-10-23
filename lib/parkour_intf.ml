@@ -295,4 +295,202 @@ module type TEXT = sig
       none. Unlike [take_while ~label], adds nothing to later errors. *)
 
   val skip_while : ?label:string -> (char -> bool) -> unit t
+  (** Like {!take_while}, discarding the text. *)
+
+  (** {1 Characters}
+
+      Predicates and parsers for ASCII character classes. Non-ASCII bytes belong
+      to no class; see {!Utf8} for scalar-level parsing. None of these commit,
+      and none leave a hint. *)
+
+  val is_digit : char -> bool
+  (** ['0'] to ['9']. *)
+
+  val is_letter : char -> bool
+  (** ['a'] to ['z'] and ['A'] to ['Z']. *)
+
+  val is_alnum : char -> bool
+  (** {!is_digit} or {!is_letter}. *)
+
+  val is_hex_digit : char -> bool
+  (** ['0'] to ['9'], ['a'] to ['f'] and ['A'] to ['F']. *)
+
+  val is_space : char -> bool
+  (** Space, tab, newline, carriage return and form feed (the set trimmed by
+      [String.trim]). *)
+
+  val digit : char t
+  (** A character satisfying {!is_digit}; expects [digit]. *)
+
+  val letter : char t
+  (** A character satisfying {!is_letter}; expects [letter]. *)
+
+  val hex_digit : char t
+  (** A character satisfying {!is_hex_digit}; expects [hexadecimal digit]. *)
+
+  val one_of : string -> char t
+  (** [one_of "+-"] is one of the given characters; expects each of them as a
+      literal, e.g. [expected '+' or '-'] . *)
+
+  val none_of : string -> char t
+  (** Any character except the given ones. Like {!any}, it expects nothing, so a
+      failure reads [unexpected X]. *)
+
+  val newline : unit t
+  (** ["\n"] or ["\r\n"]; expects [newline]. *)
+
+  val whitespace : unit t
+  (** Zero or more {!is_space} characters, {!hidden} from error messages. *)
+
+  (** {1 Text} *)
+
+  val string_ci : string -> string t
+  (** Like {!string} but ASCII case-insensitive. Returns the input's text, not
+      the argument. Expects the argument as a literal. *)
+
+  val consumed : _ t -> string t
+  (** [consumed p] runs [p] and returns the text it consumed. Failure,
+      commitment and hints are those of [p]. *)
+
+  (** {1 Numbers}
+
+      Numbers are single tokens matched greedily: they either fail at their
+      start, consuming nothing, or succeed without leaving a hint. A value too
+      large for the type fails with a message ([integer out of range] or
+      [number out of range]) that underlines the whole token. *)
+
+  val natural : int t
+  (** [[0-9]+]; expects [integer]. Prefer it to {!integer} in expression
+      grammars that have a prefix minus operator. *)
+
+  val integer : int t
+  (** [-?[0-9]+]; expects [integer]. *)
+
+  val number : float t
+  (** [-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?]; expects [number]. An optional
+      part is taken only if it is complete: on ["1.e5"] it matches ["1"]. A
+      result that is infinite is out of range. *)
+
+  (** {1 Strings} *)
+
+  val quoted : ?escape:string t -> char -> string t
+  (** [quoted ~escape q] is the text between two [q] characters on one line,
+      with the quotes removed. Expects [string] at the opening quote. Raw bytes
+      (including invalid UTF-8) are copied as they are.
+
+      With [escape], a backslash starts an escape sequence: [escape] is run
+      starting {e at the backslash} and its result replaces the sequence. If it
+      fails without committing, complaining at the backslash or the byte after
+      it, the failure becomes [invalid escape sequence], underlining the
+      backslash and the character after it. Other failures of [escape] are
+      reported unchanged. Without [escape], a backslash is an ordinary
+      character.
+
+      A newline ([\n] or [\r]) or the end of input before the closing quote,
+      including right after a backslash, fails with [unterminated string],
+      underlining the string from its opening quote to that point. Never
+      commits, and leaves no hint. *)
+
+  val json_escape : string t
+  (** A JSON escape sequence starting at its backslash: a backslash followed by
+      a double quote, backslash, slash, [b], [f], [n], [r] or [t]; or a [\uXXXX]
+      escape. The result is UTF-8; a surrogate pair of [\u] escapes gives one
+      scalar. An unknown escape expects [escape sequence] at the byte after the
+      backslash. Malformed hexadecimal digits, or a surrogate that is not part
+      of a pair, fail with [invalid unicode escape], underlining the offending
+      escape (for a high surrogate followed by another [\u] escape, both). *)
+
+  val string_literal : string t
+  (** [quoted ~escape:json_escape '"']: a JSON-style string literal. *)
+
+  (** {1 Whitespace, comments and tokens} *)
+
+  (** Whitespace and comment policies. *)
+  module Lexeme : sig
+    (** The parsers of one policy. Each skips trailing [space] after the token
+        it parses. *)
+    module type S = sig
+      val space : unit t
+      (** Whitespace and comments, {!hidden} from error messages. A line comment
+          stops before its newline. Fails with [unterminated comment], at the
+          end of input and underlining the opening delimiter, if a block comment
+          is not closed. *)
+
+      val lexeme : 'a t -> 'a t
+      (** [lexeme p] is [p] followed by {!space}. *)
+
+      val symbol : string -> string t
+      (** [symbol s] is {!string}[ s] followed by {!space}. *)
+
+      val keyword : string -> string t
+      (** [keyword s] matches [s] only if it is not followed by an identifier
+          character, then skips {!space}. Otherwise fails at its start,
+          consuming nothing, expecting [s] as a literal: [keyword "if"] on
+          ["iffy"] reports [expected "if", found "iffy"]. *)
+
+      val identifier : string t
+      (** An identifier start character followed by identifier characters,
+          unless it is a reserved word, then {!space}. Otherwise fails at its
+          start, consuming nothing, expecting [identifier]. *)
+    end
+
+    val make :
+      ?line_comments:string list ->
+      ?block_comments:(string * string) list ->
+      ?nested_comments:bool ->
+      ?newlines:bool ->
+      ?ident_start:(char -> bool) ->
+      ?ident_char:(char -> bool) ->
+      ?reserved:string list ->
+      unit ->
+      (module S)
+    (** [make ()] builds the parsers for a language, e.g.
+        {[
+        module L = (val Lexeme.make ~line_comments:[ "#" ] ())
+        ]}
+
+        - [line_comments]: delimiters of comments that run to the end of the
+          line (default none).
+        - [block_comments]: [(opening, closing)] delimiters (default none).
+          Block openers are tried before line openers, so Lua's [--] and
+          [--[[ ... ]]] work together.
+        - [nested_comments]: whether block comments nest (default [false]).
+        - [newlines]: whether newlines count as whitespace (default [true]).
+          When [false], {!S.space} stops before ['\n'] and ['\r'], so a grammar
+          can treat them as separators.
+        - [ident_start], [ident_char]: identifier characters (defaults
+          [[A-Za-z_]] and [[A-Za-z0-9_]]).
+        - [reserved]: words that {!S.identifier} rejects (default none).
+
+        Raises [Invalid_argument] if a delimiter is empty, or if comments nest
+        and a block comment opens and closes with the same text. *)
+  end
+
+  (** {1 Unicode}
+
+      Parsers over Unicode scalars of UTF-8 text. The other primitives of this
+      module work on bytes and accept any input. Here an invalid byte is an
+      error: the failure [invalid UTF-8] underlines it. The parsers that stop at
+      a condition ({!Utf8.take_while} and friends) stop at an invalid byte
+      instead of failing, and report [invalid UTF-8] if what follows fails at
+      that point. *)
+  module Utf8 : sig
+    val any : Uchar.t t
+    (** Any scalar. At the end of input it expects nothing. *)
+
+    val char : Uchar.t -> Uchar.t t
+    (** Exactly this scalar; expects it as a literal. *)
+
+    val satisfy : string -> (Uchar.t -> bool) -> Uchar.t t
+    (** [satisfy name pred]: a scalar satisfying [pred], expecting [name]. *)
+
+    val take_while : ?label:string -> (Uchar.t -> bool) -> string t
+    (** Like {!take_while} on scalars. *)
+
+    val take_while1 : string -> (Uchar.t -> bool) -> string t
+    (** Like {!take_while1} on scalars. *)
+
+    val skip_while : ?label:string -> (Uchar.t -> bool) -> unit t
+    (** Like {!skip_while} on scalars. *)
+  end
 end

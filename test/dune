@@ -1,7 +1,12 @@
 ; To add a test executable: add its name to `names` and a `run` line to the test-long rule.
 
 (tests
- (names test_harness test_support_modules test_engine test_source_render)
+ (names
+  test_harness
+  test_support_modules
+  test_engine
+  test_source_render
+  test_text)
  (libraries parkour parkour_test_support qcheck-core qcheck-core.runner))
 
 (rule
@@ -11,4 +16,5 @@
    (run %{exe:test_harness.exe} --long)
    (run %{exe:test_support_modules.exe} --long)
    (run %{exe:test_engine.exe} --long)
-   (run %{exe:test_source_render.exe} --long))))
+   (run %{exe:test_source_render.exe} --long)
+   (run %{exe:test_text.exe} --long))))

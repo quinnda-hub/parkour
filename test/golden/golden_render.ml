@@ -176,3 +176,29 @@ let () =
   header "compact pp: without source, empty span, warning";
   Format.printf "%a@." Diagnostic.pp
     (Diagnostic.make ~severity:`Warning ~span:(Span.point 5) "odd")
+
+(* Text primitives: the library's own messages *)
+
+module L =
+  (val Lexeme.make ~line_comments:[ "#" ]
+         ~block_comments:[ ("/*", "*/") ]
+         ~reserved:[ "let"; "in" ] ())
+
+let () =
+  case ~name:"limits.txt" "integer out of range"
+    (string "max = " *> integer)
+    "max = 99999999999999999999\n";
+  case "number out of range" (char '[' *> number) "[1.5e999, 2]";
+  case "unterminated string (newline)" string_literal
+    "\"never closed\nnext line";
+  case "unterminated string (end of input)" string_literal "\"abc\\";
+  case "invalid escape sequence" string_literal "\"tab\\q here\"";
+  case "invalid unicode escape (lone surrogate)" string_literal
+    "\"emoji \\ud83d here\"";
+  case "invalid unicode escape (short)" string_literal "\"\\u12G4\"";
+  case "unterminated comment"
+    (L.symbol "x" *> L.symbol "=" *> L.lexeme integer)
+    "x = 1 /* started here\nand never closed\n";
+  case "invalid UTF-8" (many Utf8.any) "caf\xe9 au lait";
+  case "identifier on a reserved word" L.identifier "let = 1";
+  case "keyword on a longer identifier" (L.keyword "if") "iffy = 1"

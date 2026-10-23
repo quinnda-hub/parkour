@@ -182,3 +182,69 @@ char 14: error[E7]: bad value
 bytes 15-19: error[E7]: bad value
 === compact pp: without source, empty span, warning ===
 byte 5: warning: odd
+=== integer out of range ===
+error: integer out of range
+ --> limits.txt:1:7
+  |
+1 | max = 99999999999999999999
+  |       ^^^^^^^^^^^^^^^^^^^^
+=== number out of range ===
+error: number out of range
+ --> 1:2
+  |
+1 | [1.5e999, 2]
+  |  ^^^^^^^
+=== unterminated string (newline) ===
+error: unterminated string
+ --> 1:1
+  |
+1 | "never closed
+  | ^^^^^^^^^^^^^
+=== unterminated string (end of input) ===
+error: unterminated string
+ --> 1:1
+  |
+1 | "abc\
+  | ^^^^^
+=== invalid escape sequence ===
+error: invalid escape sequence
+ --> 1:5
+  |
+1 | "tab\q here"
+  |     ^^
+=== invalid unicode escape (lone surrogate) ===
+error: invalid unicode escape
+ --> 1:8
+  |
+1 | "emoji \ud83d here"
+  |        ^^^^^^
+=== invalid unicode escape (short) ===
+error: invalid unicode escape
+ --> 1:2
+  |
+1 | "\u12G4"
+  |  ^^^^
+=== unterminated comment ===
+error: unterminated comment
+ --> 1:7
+  |
+1 | x = 1 /* started here
+  |       ^^
+=== invalid UTF-8 ===
+error: invalid UTF-8
+ --> 1:4
+  |
+1 | caf� au lait
+  |    ^
+=== identifier on a reserved word ===
+error: expected identifier, found "let"
+ --> 1:1
+  |
+1 | let = 1
+  | ^^^ expected identifier
+=== keyword on a longer identifier ===
+error: expected "if", found "iffy"
+ --> 1:1
+  |
+1 | iffy = 1
+  | ^^^^ expected "if"

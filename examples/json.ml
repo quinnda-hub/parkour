@@ -6,9 +6,9 @@
    It shows the main techniques: mutually recursive parsers with
    [let rec ... = lazy] and [force], [hidden] whitespace, [cut] after an
    opening delimiter so errors inside it are not retried as something else,
-   [context] for "while parsing ..." information, and [validate] for checks
-   that underline a whole token. String escapes are limited to the simple
-   ones (no \u escapes) to keep the example short. *)
+   and [context] for "while parsing ..." information. Strings and numbers come from the library:
+   [string_literal] handles every JSON escape, including \u escapes and
+   surrogate pairs, and [number] reports out-of-range values. *)
 
 open Parkour
 
@@ -20,38 +20,11 @@ type json =
   | Array of json list
   | Object of (string * json) list
 
-let is_space = function ' ' | '\n' | '\t' | '\r' -> true | _ -> false
-let ws = hidden (skip_while is_space)
+let ws = whitespace
 let lexeme p = p <* ws
 let sym c = lexeme (char c)
-
-let escape =
-  char '\\' *> cut
-  *> choice ~label:"escape sequence"
-       [
-         char '"' *> return '"';
-         char '\\' *> return '\\';
-         char '/' *> return '/';
-         char 'n' *> return '\n';
-         char 't' *> return '\t';
-         char 'r' *> return '\r';
-       ]
-
-let string_literal =
-  let chunk = take_while1 "character" (fun c -> c <> '"' && c <> '\\') in
-  let piece = chunk <|> (escape >>| String.make 1) in
-  lexeme (char '"' *> cut *> many piece <* char '"' >>| String.concat "")
-  <?> "string"
-
-let number =
-  lexeme
-    (take_while1 "number" (function
-      | '0' .. '9' | '-' | '+' | '.' | 'e' | 'E' -> true
-      | _ -> false))
-  |> validate (fun s ->
-      match float_of_string_opt s with
-      | Some f -> Ok f
-      | None -> Error ("invalid number " ^ s))
+let str = lexeme string_literal
+let num = lexeme number
 
 let rec value =
   lazy
@@ -60,8 +33,8 @@ let rec value =
          lexeme (string "null") *> return Null;
          lexeme (string "true") *> return (Bool true);
          lexeme (string "false") *> return (Bool false);
-         (number >>| fun n -> Number n);
-         (string_literal >>| fun s -> String s);
+         (num >>| fun n -> Number n);
+         (str >>| fun s -> String s);
          force array;
          force obj;
        ])
@@ -75,7 +48,7 @@ and array =
 and obj =
   lazy
     (let member =
-       let+ key = string_literal <* sym ':' and+ v = force value in
+       let+ key = str <* sym ':' and+ v = force value in
        (key, v)
      in
      context "object"
