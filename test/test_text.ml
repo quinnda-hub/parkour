@@ -432,6 +432,51 @@ let quoted_without_escape =
       let body = String.concat "" (String.split_on_char '\r' body) in
       run (P.quoted '\'') ("'" ^ body ^ "'x") = V (body, String.length body + 2))
 
+let strip chars s =
+  String.concat ""
+    (List.map (String.make 1)
+       (List.filter
+          (fun c -> not (String.contains chars c))
+          (List.of_seq (String.to_seq s))))
+
+let quoted_options =
+  Prop.test
+    ~name:
+      "quoted ~doubled ~multiline: roundtrips; unterminated multiline \
+       underlines the opener"
+    ~print:(fun (d, m, b) -> Printf.sprintf "doubled=%b multiline=%b %S" d m b)
+    Gen.(
+      triple bool bool
+        (string_size
+           ~gen:(oneof_list [ 'a'; '\''; '\n'; '\r'; ' ' ])
+           (int_range 0 10)))
+    (fun (doubled, multiline, s) ->
+      let body = if multiline then s else strip "\n\r" s in
+      let body = if doubled then body else strip "'" body in
+      let enc =
+        if doubled then String.concat "''" (String.split_on_char '\'' body)
+        else body
+      in
+      let text = "'" ^ enc ^ "'" in
+      let p = P.quoted ~doubled ~multiline '\'' in
+      run p (text ^ "x") = V (body, String.length text)
+      &&
+      (* No closing quote: an open pair of quotes does not close it either. *)
+      let open_ = strip "'" body in
+      let tail = if doubled then "''" else "" in
+      let src = "'" ^ open_ ^ tail in
+      if multiline then custom "unterminated string" 0 1 (run p src)
+      else
+        let stop =
+          match
+            (String.index_from_opt src 1 '\n', String.index_from_opt src 1 '\r')
+          with
+          | Some a, Some b -> min a b
+          | Some a, None | None, Some a -> a
+          | None, None -> String.length src
+        in
+        custom "unterminated string" 0 stop (run p src))
+
 (* Lexeme *)
 
 type policy = { op : string; cl : string; line : string; nested : bool }
@@ -719,6 +764,7 @@ let () =
         string_bad_escape;
         string_bad_unicode;
         quoted_without_escape;
+        quoted_options;
         space_prop flat "flat";
         space_prop nesting "nested";
         space_prop lua "line opener prefixes block opener";

@@ -89,6 +89,8 @@ let custom_fail pos ~start ~stop message =
           kind = Custom { code = None; message };
           span = Some (Span.make ~start ~stop);
           context = [];
+          labels = [];
+          notes = [];
         };
       cut = false;
     }

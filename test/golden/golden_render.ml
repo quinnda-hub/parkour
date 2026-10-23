@@ -243,3 +243,40 @@ let () =
     | Some l ->
         String.concat " "
           (List.map (function Some v -> v | None -> "<invalid>") l))
+
+(* Secondary labels and notes *)
+
+let () =
+  let text = "let x = 1 + \"a\"\n" in
+  diag_case "secondary label on the same line" text
+    (Diagnostic.make ~label:"this is a string"
+       ~labels:[ (find text "1", "this is an integer") ]
+       ~span:(find text "\"a\"") "cannot add a string to an integer");
+  let text = "name = 1\nsize = 2\nkind = 3\nmode = 4\nsize = 5\nlast = 6\n" in
+  diag_case "secondary label on an earlier line (gap)" text
+    (Diagnostic.make
+       ~labels:[ (find text "size", "first defined here") ]
+       ~span:(find text "size = 5") "duplicate key \"size\"");
+  let text = "f(a,\n  b,\n  c)\nrest\n" in
+  diag_case "multi-line secondary span" text
+    (Diagnostic.make
+       ~labels:[ (find text "(a,\n  b,\n  c)", "in this call") ]
+       ~span:(find text "rest") "unexpected statement");
+  let text = "port = 80x\n" in
+  diag_case "note" text
+    (Diagnostic.make ~span:(find text "x")
+       ~notes:[ "ports are plain integers"; "remove the suffix" ]
+       "expected end of line");
+  diag_case ~color:true "colour with secondary label and note" text
+    (Diagnostic.make ~label:"here"
+       ~labels:[ (find text "port", "the key") ]
+       ~notes:[ "see the manual" ] ~span:(find text "80x") "bad value");
+  let module L = (val Lexeme.make ()) in
+  let list =
+    between (L.symbol "[") (L.symbol "]")
+      (sep_by ~sep:(L.symbol ",") (L.lexeme integer))
+  in
+  case "between: opened here, across lines" list "[1, 2,\n 3,\n 4 5]";
+  case "unterminated multiline string"
+    (quoted ~multiline:true '"')
+    "\"line one\nline two\n"

@@ -122,10 +122,19 @@ module type S = sig
 
   val return : 'a -> 'a t
 
-  val fail : ?code:string -> string -> 'a t
+  val fail :
+    ?code:string ->
+    ?labels:(Span.t * string) list ->
+    ?notes:string list ->
+    string ->
+    'a t
   (** [fail msg] fails at the current position with a custom message. A custom
       message takes precedence over plain expectations at the same position.
-      Does not commit. *)
+      Does not commit.
+
+      [labels] and [notes] end up in the diagnostic (see {!Diagnostic.make}):
+      secondary spans, which you can get from {!spanned}, and hints, e.g.
+      [fail ~labels:[ (span, "first defined here") ] "duplicate key"]. *)
 
   val map : ('a -> 'b) -> 'a t -> 'b t
   val bind : 'a t -> ('a -> 'b t) -> 'b t
@@ -353,7 +362,10 @@ module type S = sig
   (** Like {!chainl1}, folding to the right: [a ^ b ^ c] is [a ^ (b ^ c)]. *)
 
   val between : _ t -> _ t -> 'a t -> 'a t
-  (** [between open_ close p] is [open_ *> p <* close]. *)
+  (** [between open_ close p] is [open_ *> p <* close]. When [close] fails and
+      its failure is the one reported, the diagnostic gets a secondary label
+      ["opened here"] on the input [open_] consumed, so an unclosed bracket is
+      shown together with where it was opened. *)
 
   (** {1:recovery Error recovery}
 
@@ -565,7 +577,8 @@ module type TEXT = sig
 
   (** {1 Strings} *)
 
-  val quoted : ?escape:string t -> char -> string t
+  val quoted :
+    ?escape:string t -> ?doubled:bool -> ?multiline:bool -> char -> string t
   (** [quoted ~escape q] is the text between two [q] characters on one line,
       with the quotes removed. Expects [string] at the opening quote. Raw bytes
       (including invalid UTF-8) are copied as they are.
@@ -578,10 +591,19 @@ module type TEXT = sig
       reported unchanged. Without [escape], a backslash is an ordinary
       character.
 
+      With [doubled] (default [false]), two quotes in a row inside the string
+      stand for one [q], as in CSV: [quoted ~doubled:true] on a double quote
+      reads two of them in a row as one double quote in the result. It combines
+      with [escape].
+
       A newline ([\n] or [\r]) or the end of input before the closing quote,
       including right after a backslash, fails with [unterminated string],
-      underlining the string from its opening quote to that point. Never
-      commits, and leaves no hint. *)
+      underlining the string from its opening quote to that point. With
+      [multiline] (default [false]) raw newlines are part of the string instead,
+      and only the end of input is unterminated; the error is reported at the
+      end of input but underlines just the opening quote, since the rest of the
+      text is probably not meant to be a string. Never commits, and leaves no
+      hint. *)
 
   val json_escape : string t
   (** A JSON escape sequence starting at its backslash: a backslash followed by

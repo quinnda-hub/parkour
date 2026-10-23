@@ -285,3 +285,62 @@ error: expected newline or end of input, found space
 4 | mana = 5 5
   |         ^ expected newline or end of input
 partial result: <invalid> 3 <invalid> <invalid> 7
+=== secondary label on the same line ===
+error: cannot add a string to an integer
+ --> 1:13
+  |
+1 | let x = 1 + "a"
+  |         - this is an integer
+  |             ^^^ this is a string
+=== secondary label on an earlier line (gap) ===
+error: duplicate key "size"
+ --> 5:1
+  |
+2 | size = 2
+  | ---- first defined here
+...
+5 | size = 5
+  | ^^^^^^^^
+=== multi-line secondary span ===
+error: unexpected statement
+ --> 4:1
+  |
+1 | f(a,
+  |  ---
+2 |   b,
+  | ----
+3 |   c)
+  | ---- in this call
+4 | rest
+  | ^^^^
+=== note ===
+error: expected end of line
+ --> 1:10
+  |
+1 | port = 80x
+  |          ^
+  = note: ports are plain integers
+  = note: remove the suffix
+=== colour with secondary label and note ===
+\e[1;31merror\e[0m: \e[1mbad value\e[0m
+ \e[1;34m-->\e[0m 1:8
+  \e[1;34m|\e[0m
+\e[1;34m1\e[0m \e[1;34m|\e[0m port = 80x
+  \e[1;34m|\e[0m \e[1;34m---- the key\e[0m
+  \e[1;34m|\e[0m        \e[1;31m^^^ here\e[0m
+  \e[1;34m=\e[0m \e[1mnote:\e[0m see the manual
+=== between: opened here, across lines ===
+error: expected ',' or ']', found '5'
+ --> 3:4
+  |
+1 | [1, 2,
+  | - opened here
+2 |  3,
+3 |  4 5]
+  |    ^ expected ',' or ']'
+=== unterminated multiline string ===
+error: unterminated string
+ --> 1:1
+  |
+1 | "line one
+  | ^

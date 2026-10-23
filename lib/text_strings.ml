@@ -12,17 +12,27 @@ let no_progress pos =
 
 (* [quoted] is a loop over the raw text; only escapes call a parser. [chunk]
    is the start of the raw text not yet copied to [buf]. *)
-let quoted ?escape quote =
+let quoted ?escape ?(doubled = false) ?(multiline = false) quote =
   let items = [ Expected.Label "string" ] in
   let backslash = escape <> None in
   fun st start ->
     let s = st.input in
-    let unterminated i = custom_fail i ~start ~stop:i "unterminated string" in
+    let unterminated i =
+      custom_fail i ~start
+        ~stop:(if multiline then start + 1 else i)
+        "unterminated string"
+    in
     let rec go buf chunk i =
       if i >= st.len then unterminated i
       else
         let c = String.unsafe_get s i in
-        if c = quote then begin
+        if c = quote && doubled && i + 1 < st.len && s.[i + 1] = quote then begin
+          (* Keep the first quote of the pair, drop the second. *)
+          let b = match buf with Some b -> b | None -> Buffer.create 64 in
+          Buffer.add_substring b s chunk (i + 1 - chunk);
+          go (Some b) (i + 2) (i + 2)
+        end
+        else if c = quote then begin
           let tail = String.sub s chunk (i - chunk) in
           match buf with
           | None -> pass tail (i + 1)
@@ -30,7 +40,7 @@ let quoted ?escape quote =
               Buffer.add_string b tail;
               pass (Buffer.contents b) (i + 1)
         end
-        else if c = '\n' || c = '\r' then unterminated i
+        else if (c = '\n' || c = '\r') && not multiline then unterminated i
         else if c = '\\' && backslash then
           begin if i + 1 >= st.len then unterminated (i + 1)
           else

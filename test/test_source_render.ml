@@ -281,6 +281,230 @@ let huge_line =
       in
       String.length out < 1000)
 
+(* Secondary labels and notes *)
+
+(* ASCII text with newlines; a primary and 1-3 secondary spans, each with a
+   unique text, and 0-2 notes. *)
+let gen_labelled =
+  let open Gen in
+  let line =
+    string_size ~gen:(oneof [ char_range 'a' 'z'; return ' ' ]) (int_bound 25)
+  in
+  let* text = map (String.concat "\n") (list_size (int_range 1 8) line) in
+  let n = String.length text in
+  let span =
+    let* a = int_bound n in
+    let* l = int_bound (min 40 (n - a)) in
+    return (Span.make ~start:a ~stop:(a + l))
+  in
+  let* primary = span in
+  let* secondary = list_size (int_range 1 3) span in
+  let* notes = int_bound 2 in
+  return (text, primary, secondary, notes)
+
+let print_labelled (text, p, sec, notes) =
+  Printf.sprintf "%S primary %d-%d secondary %s notes %d" text p.Span.start
+    p.stop
+    (String.concat ","
+       (List.map
+          (fun (s : Span.t) -> Printf.sprintf "%d-%d" s.start s.stop)
+          sec))
+    notes
+
+let labelled_diagnostic (text, primary, secondary, notes) =
+  let d =
+    Diagnostic.make ~label:"P0"
+      ~labels:
+        (List.mapi (fun i sp -> (sp, Printf.sprintf "S%d" (i + 1))) secondary)
+      ~notes:(List.init notes (fun i -> Printf.sprintf "N%d" (i + 1)))
+      ~span:primary "message"
+  in
+  (Source.make text, d)
+
+let render_labelled c =
+  let src, d = labelled_diagnostic c in
+  Diagnostic.render src d
+
+let occurrences ~sub s =
+  let n = String.length sub in
+  let rec go i acc =
+    if i + n > String.length s then acc
+    else go (i + 1) (if String.sub s i n = sub then acc + 1 else acc)
+  in
+  go 0 0
+
+let labelled_shape =
+  Prop.test
+    ~name:
+      "render with labels: no trailing spaces, one final newline, each text \
+       once"
+    ~print:print_labelled gen_labelled (fun ((_, _, secondary, notes) as c) ->
+      let out = render_labelled c in
+      let lines = String.split_on_char '\n' out in
+      let tags =
+        ("P0" :: List.mapi (fun i _ -> Printf.sprintf "S%d" (i + 1)) secondary)
+        @ List.init notes (fun i -> Printf.sprintf "N%d" (i + 1))
+      in
+      out <> ""
+      && out.[String.length out - 1] = '\n'
+      && List.nth lines (List.length lines - 1) = ""
+      && List.nth lines (List.length lines - 2) <> ""
+      && List.for_all (fun l -> l = "" || l.[String.length l - 1] <> ' ') lines
+      && List.for_all (fun tag -> occurrences ~sub:tag out = 1) tags)
+
+(* The model of an annotation: its lines, after trimming trailing blanks. *)
+let model text (sp : Span.t) =
+  let n = String.length text in
+  let start = min sp.start n and stop = min sp.stop n in
+  let stop =
+    let rec trim e =
+      if e > start then
+        if String.contains " \t\n\r\x0c" text.[e - 1] then trim (e - 1) else e
+      else stop
+    in
+    trim stop
+  in
+  let line_of o =
+    1
+    + List.length
+        (List.filter (( = ) '\n')
+           (List.of_seq (String.to_seq (String.sub text 0 o))))
+  in
+  let first = line_of start in
+  let last = if stop > start then line_of (stop - 1) else first in
+  (start, stop, first, last)
+
+let shown_lines first last =
+  if last - first + 1 > 4 then [ first; first + 1; last ]
+  else List.init (last - first + 1) (fun k -> first + k)
+
+let rows_of out = List.filter (fun l -> l <> "") (String.split_on_char '\n' out)
+
+let first_nonblank l =
+  let rec go i = if i < String.length l && l.[i] = ' ' then go (i + 1) else i in
+  go 0
+
+let labelled_lines =
+  Prop.test
+    ~name:
+      "render with labels: shown lines are the union, a one-line gap filled, \
+       ... at longer gaps" ~print:print_labelled gen_labelled
+    (fun ((text, primary, secondary, _) as c) ->
+      let lines =
+        List.sort_uniq compare
+          (List.concat_map
+             (fun sp ->
+               let _, _, f, l = model text sp in
+               shown_lines f l)
+             (primary :: secondary))
+      in
+      (* a single missing line is shown instead of "..." *)
+      let rec fill = function
+        | a :: (b :: _ as rest) when b = a + 2 -> a :: (a + 1) :: fill rest
+        | a :: rest -> a :: fill rest
+        | [] -> []
+      in
+      let lines = fill lines in
+      let expected =
+        List.concat
+          (List.mapi
+             (fun i l ->
+               (if i > 0 && l > List.nth lines (i - 1) + 1 then [ "..." ]
+                else [])
+               @ [ string_of_int l ])
+             lines)
+      in
+      let observed =
+        List.filter_map
+          (fun l ->
+            let k = first_nonblank l in
+            if l = "..." then Some l
+            else if k < String.length l && l.[k] >= '0' && l.[k] <= '9' then
+              Some
+                (List.hd
+                   (String.split_on_char ' '
+                      (String.sub l k (String.length l - k))))
+            else None)
+          (rows_of (render_labelled c))
+      in
+      observed = expected)
+
+let marker_col l =
+  let rec go i =
+    if i >= String.length l then None
+    else if l.[i] = '^' || l.[i] = '-' then Some (i, l.[i])
+    else go (i + 1)
+  in
+  (* only rows of the form "  | ..." *)
+  let k = first_nonblank l in
+  if k < String.length l && l.[k] = '|' then go (k + 1) else None
+
+let labelled_markers =
+  Prop.test
+    ~name:
+      "render with labels: one-line annotations are drawn at their column; \
+       rows are ordered" ~print:print_labelled gen_labelled
+    (fun ((text, primary, secondary, _) as c) ->
+      let out = render_labelled c in
+      let all =
+        (primary, "P0", '^')
+        :: List.mapi
+             (fun i sp -> (sp, Printf.sprintf "S%d" (i + 1), '-'))
+             secondary
+      in
+      let max_line =
+        List.fold_left
+          (fun m (sp, _, _) ->
+            let _, _, f, l = model text sp in
+            List.fold_left max m (shown_lines f l))
+          0 all
+      in
+      let g = String.length (string_of_int max_line) in
+      let rows = rows_of out in
+      let exact (sp, tag, ch) =
+        let start, stop, first, last = model text sp in
+        if first <> last then true
+        else
+          let ls =
+            if start = 0 then 0
+            else
+              match String.rindex_from_opt text (start - 1) '\n' with
+              | Some k -> k + 1
+              | None -> 0
+          in
+          let le =
+            try String.index_from text start '\n'
+            with Not_found -> String.length text
+          in
+          let n = max 1 (min stop le - start) in
+          let row =
+            String.make g ' ' ^ " | "
+            ^ String.make (start - ls) ' '
+            ^ String.make n ch ^ " " ^ tag
+          in
+          List.mem row rows
+      in
+      let ordered =
+        let rec go = function
+          | a :: (b :: _ as rest) -> (
+              match (marker_col a, marker_col b) with
+              | Some (ca, ma), Some (cb, mb) ->
+                  (ca < cb || (ca = cb && not (ma = '-' && mb = '^')))
+                  && go rest
+              | _ -> go rest)
+          | _ -> true
+        in
+        (* marker rows of a source line are consecutive; a source row resets *)
+        let rec groups acc cur = function
+          | [] -> List.rev (List.rev cur :: acc)
+          | l :: rest ->
+              if marker_col l <> None then groups acc (l :: cur) rest
+              else groups (List.rev cur :: acc) [] rest
+        in
+        List.for_all go (groups [] [] rows)
+      in
+      List.for_all exact all && ordered)
+
 let () =
   Prop.run "source_render"
     [
@@ -291,4 +515,7 @@ let () =
       render_colour;
       caret_alignment;
       huge_line;
+      labelled_shape;
+      labelled_lines;
+      labelled_markers;
     ]

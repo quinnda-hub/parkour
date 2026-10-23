@@ -40,18 +40,41 @@ val context : t -> (string * Span.t) list
     with the span from where it started to where the problem occurred. See
     {!S.context}. *)
 
+val label : t -> string option
+(** Text shown beside the primary underline, if given explicitly. When absent,
+    {!render} shows [expected ...] if there are expectations. *)
+
+val labels : t -> (Span.t * string) list
+(** Secondary labels: other places that help explain the problem (say, where an
+    unclosed bracket was opened), in the order given. *)
+
+val notes : t -> string list
+(** Free-form hints shown after the source excerpt, e.g. how to fix the problem.
+*)
+
 val make :
   ?severity:severity ->
   ?code:string ->
   ?expected:Expected.t list ->
   ?found:string ->
   ?context:(string * Span.t) list ->
+  ?label:string ->
+  ?labels:(Span.t * string) list ->
+  ?notes:string list ->
   span:Span.t ->
   string ->
   t
 (** [make ~span message] builds a diagnostic, e.g. for semantic checks run after
     parsing, so they render like syntax errors. [severity] defaults to [`Error];
-    [expected] is sorted and deduplicated. *)
+    [expected] is sorted and deduplicated. [label] is the text for the primary
+    underline, [labels] are secondary spans with their texts (which may be
+    empty), and [notes] are hints. See {!render}. *)
+
+val add_label : Span.t -> string -> t -> t
+(** [add_label span text d] appends a secondary label. *)
+
+val add_note : string -> t -> t
+(** [add_note text d] appends a note. *)
 
 val is_error : t -> bool
 
@@ -91,7 +114,23 @@ val render :
     Underlines are aligned for wide (e.g. CJK) and zero-width (combining)
     characters using a built-in approximation of terminal widths. Underlines
     stop before trailing whitespace in the span (such as what a lexeme skipped),
-    unless the span is only whitespace. The result ends with a newline. *)
+    unless the span is only whitespace. The result ends with a newline.
+
+    Secondary {!labels} are underlined with [-] on their own rows, below the
+    source line they touch (the lines of all spans are shown, with [...] where
+    lines are skipped):
+    {v
+    error: expected ',' or ']', found '5'
+     --> 3:4
+      |
+    1 | [1, 2,
+      | - opened here
+    ...
+    3 |  4 5]
+      |    ^ expected ',' or ']'
+    v}
+    {!notes} follow the context frames. Rows of one line are ordered by the
+    start column of their underline. *)
 
 val pp_rendered :
   ?location:location ->

@@ -8,6 +8,9 @@ type t = {
   expected : Expected.t list;
   found : string option;
   context : (string * Span.t) list;
+  label : string option;
+  labels : (Span.t * string) list;
+  notes : string list;
 }
 
 let severity t = t.severity
@@ -17,12 +20,28 @@ let message t = t.message
 let expected t = t.expected
 let found t = t.found
 let context t = t.context
+let label t = t.label
+let labels t = t.labels
+let notes t = t.notes
 
 let make ?(severity = `Error) ?code ?(expected = []) ?found ?(context = [])
-    ~span message =
+    ?label ?(labels = []) ?(notes = []) ~span message =
   let expected = List.sort_uniq Expected.compare expected in
-  { severity; code; span; message; expected; found; context }
+  {
+    severity;
+    code;
+    span;
+    message;
+    expected;
+    found;
+    context;
+    label;
+    labels;
+    notes;
+  }
 
+let add_label span text t = { t with labels = t.labels @ [ (span, text) ] }
+let add_note note t = { t with notes = t.notes @ [ note ] }
 let is_error t = t.severity = `Error
 
 type location = [ `Line_column | `Char_offset | `Byte_offset ]
@@ -66,146 +85,76 @@ let pp_located ?(location = `Line_column) source ppf t =
 
 (* Rendering *)
 
-type seg = Plain of string | Gutter of string | Sev of string | Msg of string
+open Excerpt
 
-let seg_text = function Plain s | Gutter s | Sev s | Msg s -> s
-
-let map_seg f = function
-  | Plain s -> Plain (f s)
-  | Gutter s -> Gutter (f s)
-  | Sev s -> Sev (f s)
-  | Msg s -> Msg (f s)
-
-let rstrip s =
-  let n = ref (String.length s) in
-  while !n > 0 && s.[!n - 1] = ' ' do
-    decr n
-  done;
-  String.sub s 0 !n
-
-(* Drop trailing spaces across segments. *)
-let trim_segs segs =
-  let rec go = function
-    | [] -> []
-    | seg :: rest ->
-        let seg = map_seg rstrip seg in
-        if seg_text seg = "" then go rest else seg :: rest
-  in
-  List.rev (go (List.rev segs))
-
-let spaces n = String.make (max 0 n) ' '
-let digits n = String.length (string_of_int n)
-
-let utf8 code =
-  let b = Buffer.create 4 in
-  Buffer.add_utf_8_uchar b (Uchar.of_int code);
-  Buffer.contents b
-
-(* Characters shown as U+FFFD: C1 controls and bidirectional controls. *)
-let is_odd c =
-  (0x80 <= c && c <= 0x9f)
-  || (0x202A <= c && c <= 0x202E)
-  || (0x2066 <= c && c <= 0x2069)
-
-(* Calls [f byte len code col width] for each character of text[start, stop),
-   where [col] is its display column relative to [start]. *)
-let iter_cells text ~tab_width start stop f =
-  let i = ref start and col = ref 0 in
-  while !i < stop do
-    let d = Decode.decode text !i in
-    let len = min (Decode.length d) (stop - !i) in
-    let code = Decode.code d in
-    let width =
-      if code = 9 then tab_width - (!col mod tab_width)
-      else if code < 0 || code < 0x20 || code = 0x7f || is_odd code then 1
-      else Width.of_code code
-    in
-    f !i len code !col width;
-    col := !col + width;
-    i := !i + len
-  done
-
-let cell_text text byte len code width =
-  if code = 9 then spaces width
-  else if code < 0 || is_odd code then "\xef\xbf\xbd"
-  else if code < 0x20 then utf8 (0x2400 + code)
-  else if code = 0x7f then utf8 0x2421
-  else String.sub text byte len
-
-type line_view = {
-  content : string; (* displayed text, including any … *)
-  caret_col : int; (* relative to the shown text *)
-  carets : int;
+(* One underlined region: the primary span or a secondary label. *)
+type annotation = {
+  primary : bool;
+  start : int;
+  stop : int;  (** trimmed of trailing whitespace *)
+  text : string;
+  first : int;  (** first and last line *)
+  last : int;
+  shown : int list;  (** the lines drawn: all, or first two and last *)
 }
-
-(* [p0, p1) is the span's part of the line [ls, le). *)
-let view_line text ~tab_width ~max_width ls le p0 p1 =
-  let total = ref 0 and c0 = ref 0 and c1 = ref 0 in
-  iter_cells text ~tab_width ls le (fun byte len _ col width ->
-      total := col + width;
-      if byte + len <= p0 then c0 := !total;
-      if byte + len <= p1 then c1 := !total);
-  let total = !total and c0 = !c0 and c1 = max !c0 !c1 in
-  let carets = max 1 (c1 - c0) in
-  let cend = c0 + carets in
-  let w0, w1, left, right =
-    if total <= max_width then (0, max_int, false, false)
-    else
-      let total' = max total cend in
-      let w0 = max 0 (c0 - (max_width / 3)) in
-      let w0 = min w0 (max 0 (total' - max_width)) in
-      let w1 = w0 + max_width in
-      (w0, w1, w0 > 0, w1 < total)
-  in
-  let a = if left then w0 + 1 else 0
-  and b = if right then w1 - 1 else max_int in
-  let buf = Buffer.create 128 in
-  if left then Buffer.add_string buf "\xe2\x80\xa6";
-  iter_cells text ~tab_width ls le (fun byte len code col width ->
-      if width = 0 then
-        begin if a <= col && col < b then
-          Buffer.add_string buf (cell_text text byte len code width)
-        end
-      else
-        let lo = max a col and hi = min b (col + width) in
-        if hi - lo = width then
-          Buffer.add_string buf (cell_text text byte len code width)
-        else if hi > lo then Buffer.add_string buf (spaces (hi - lo)));
-  if right then Buffer.add_string buf "\xe2\x80\xa6";
-  let s, e =
-    if w1 = max_int then (c0, cend)
-    else
-      let s = min (max c0 a) (b - 1) in
-      (s, max (s + 1) (min cend b))
-  in
-  { content = Buffer.contents buf; caret_col = s - w0; carets = e - s }
 
 let render ?(location = `Line_column) ?(color = false) ?(max_context = 2)
     ?(tab_width = 4) ?(max_width = 100) src t =
   let text = Source.text src in
   let tab_width = max 1 tab_width and max_width = max 10 max_width in
-  let start = clamp_offset src t.span.start in
-  let stop = max start (clamp_offset src t.span.stop) in
-  (* Carets never cover trailing whitespace (e.g. what a lexeme skipped),
-     unless the span is all whitespace. *)
-  let stop =
-    let rec trim e =
-      if e > start then
-        match text.[e - 1] with
-        | ' ' | '\t' | '\n' | '\r' | '\x0c' -> trim (e - 1)
-        | _ -> e
-      else stop
-    in
-    trim stop
-  in
   let line_of o = (Source.position src o).line in
-  let l1 = line_of start in
-  let l2 = if stop > start then line_of (stop - 1) else l1 in
-  let shown =
-    if l2 - l1 + 1 > 4 then [ Some l1; Some (l1 + 1); None; Some l2 ]
-    else List.init (l2 - l1 + 1) (fun k -> Some (l1 + k))
+  let annotation ~primary ~text:caption (sp : Span.t) =
+    let start = clamp_offset src sp.start in
+    let stop = max start (clamp_offset src sp.stop) in
+    (* Markers never cover trailing whitespace (e.g. what a lexeme skipped),
+       unless the span is all whitespace. *)
+    let stop =
+      let rec trim e =
+        if e > start then
+          match text.[e - 1] with
+          | ' ' | '\t' | '\n' | '\r' | '\x0c' -> trim (e - 1)
+          | _ -> e
+        else stop
+      in
+      trim stop
+    in
+    let first = line_of start in
+    let last = if stop > start then line_of (stop - 1) else first in
+    let shown =
+      if last - first + 1 > 4 then [ first; first + 1; last ]
+      else List.init (last - first + 1) (fun k -> first + k)
+    in
+    { primary; start; stop; text = caption; first; last; shown }
   in
-  let g = digits l2 in
+  let primary_text =
+    match (t.label, t.expected) with
+    | Some l, _ -> l
+    | None, [] -> ""
+    | None, l -> "expected " ^ Expected.list_to_string l
+  in
+  let primary = annotation ~primary:true ~text:primary_text t.span in
+  let annotations =
+    primary
+    :: List.map (fun (sp, text) -> annotation ~primary:false ~text sp) t.labels
+  in
+  let lines =
+    List.sort_uniq compare (List.concat_map (fun a -> a.shown) annotations)
+  in
+  (* A gap of a single line is shown rather than replaced by "...". *)
+  let filled =
+    let rec go = function
+      | a :: (b :: _ as rest) when b = a + 2 -> (a + 1) :: go rest
+      | _ :: rest -> go rest
+      | [] -> []
+    in
+    go lines
+  in
+  let lines = List.sort compare (lines @ filled) in
+  let shows a line =
+    List.mem line a.shown
+    || (List.mem line filled && a.first <= line && line <= a.last)
+  in
+  let g = digits (List.fold_left max 0 lines) in
   let sev_code =
     match t.severity with `Error -> "\027[1;31m" | `Warning -> "\027[1;33m"
   in
@@ -216,7 +165,7 @@ let render ?(location = `Line_column) ?(color = false) ?(max_context = 2)
         let code =
           match seg with
           | Plain _ -> ""
-          | Gutter _ -> "\027[1;34m"
+          | Gutter _ | Sec _ -> "\027[1;34m"
           | Sev _ -> sev_code
           | Msg _ -> "\027[1m"
         in
@@ -233,41 +182,65 @@ let render ?(location = `Line_column) ?(color = false) ?(max_context = 2)
     [
       Plain (spaces g);
       Gutter "-->";
-      Plain (" " ^ where_named src location start);
+      Plain (" " ^ where_named src location primary.start);
     ];
   let bar = [ Plain (spaces g ^ " "); Gutter "|" ] in
   emit bar;
-  let label =
-    match t.expected with
-    | [] -> ""
-    | l -> " expected " ^ Expected.list_to_string l
+  let draw_line line =
+    let sp = Source.line_span src line in
+    let ls = sp.start and le = sp.stop in
+    let touching = List.filter (fun a -> shows a line) annotations in
+    let part a =
+      let p0 = if line = a.first then min a.start le else ls in
+      let p1 = if line = a.last then min a.stop le else le in
+      (p0, max p0 p1)
+    in
+    let parts = List.map part touching in
+    let anchor =
+      match List.find_opt (fun a -> a.primary) touching with
+      | Some a -> part a
+      | None -> (
+          match parts with
+          | [] -> (ls, ls)
+          | p :: rest ->
+              List.fold_left
+                (fun ((m0, _) as m) ((p0, _) as p) -> if p0 < m0 then p else m)
+                p rest)
+    in
+    let v = view_line text ~tab_width ~max_width ls le ~anchor parts in
+    let num = string_of_int line in
+    emit
+      [
+        Plain (spaces (g - String.length num));
+        Gutter num;
+        Plain " ";
+        Gutter "|";
+        Plain (" " ^ v.content);
+      ];
+    let rows = List.map2 (fun a (col, n) -> (a, col, n)) touching v.marks in
+    let key (a, col, _) = (col, if a.primary then 0 else 1) in
+    List.iter
+      (fun (a, col, n) ->
+        let markers = String.make n (if a.primary then '^' else '-') in
+        let markers =
+          if line = a.last && a.text <> "" then markers ^ " " ^ a.text
+          else markers
+        in
+        emit
+          (bar
+          @ [
+              Plain (" " ^ spaces col);
+              (if a.primary then Sev markers else Sec markers);
+            ]))
+      (List.stable_sort (fun x y -> compare (key x) (key y)) rows)
   in
-  List.iter
-    (function
-      | None -> emit [ Gutter "..." ]
-      | Some line ->
-          let sp = Source.line_span src line in
-          let ls = sp.start and le = sp.stop in
-          let p0 = if line = l1 then min start le else ls in
-          let p1 = if line = l2 then min stop le else le in
-          let p1 = max p0 p1 in
-          let v = view_line text ~tab_width ~max_width ls le p0 p1 in
-          let num = string_of_int line in
-          emit
-            [
-              Plain (spaces (g - String.length num));
-              Gutter num;
-              Plain " ";
-              Gutter "|";
-              Plain (" " ^ v.content);
-            ];
-          emit
-            (bar
-            @ [
-                Plain (" " ^ spaces v.caret_col);
-                Sev (String.make v.carets '^' ^ if line = l2 then label else "");
-              ]))
-    shown;
+  ignore
+    (List.fold_left
+       (fun prev line ->
+         if prev > 0 && line > prev + 1 then emit [ Gutter "..." ];
+         draw_line line;
+         line)
+       0 lines);
   let ctx = t.context in
   let frame (name, (sp : Span.t)) =
     emit
@@ -293,6 +266,17 @@ let render ?(location = `Line_column) ?(color = false) ?(max_context = 2)
         ];
     frame (List.nth ctx (len - 1))
   end;
+  List.iter
+    (fun note ->
+      emit
+        [
+          Plain (spaces g ^ " ");
+          Gutter "=";
+          Plain " ";
+          Msg "note:";
+          Plain (" " ^ note);
+        ])
+    t.notes;
   Buffer.contents out
 
 let pp_rendered ?location ?color ?max_context ?tab_width ?max_width src ppf t =

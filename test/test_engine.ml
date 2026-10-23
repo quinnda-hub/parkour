@@ -327,6 +327,70 @@ let codes =
       | exception Invalid_argument _ -> true
       | _ -> false)
 
+(* Secondary labels and notes *)
+
+let gen_annotations =
+  let open Gen in
+  pair
+    (list_size (int_bound 3)
+       (map2
+          (fun a l -> (P.Span.make ~start:a ~stop:(a + l), "label"))
+          (int_bound 5) (int_bound 3)))
+    (list_size (int_bound 2) (oneof_list [ "n1"; "n2"; "n3" ]))
+
+let fail_annotations =
+  Prop.test ~name:"fail: labels and notes reach the diagnostic, also recovered"
+    ~print:(fun (labels, notes) ->
+      Printf.sprintf "%d labels, notes %s" (List.length labels)
+        (String.concat "," notes))
+    gen_annotations
+    (fun (labels, notes) ->
+      let boom = P.fail ~labels ~notes "boom" in
+      let same d =
+        P.Diagnostic.labels d = labels && P.Diagnostic.notes d = notes
+      in
+      let recovered =
+        P.(
+          recover ~catch:`Any ~sync:(skip_to eof)
+            ~fallback:(fun _ -> 'r')
+            (any *> boom))
+      in
+      (match P.parse boom "" with Error [ d ] -> same d | _ -> false)
+      && (match P.parse P.(boom <|> char 'x') "" with
+        | Error [ d ] -> same d
+        | _ -> false)
+      &&
+      match P.parse_partial recovered "ab" with
+      | Some 'r', [ d ] -> same d
+      | _ -> false)
+
+let between_opened_here =
+  Prop.test
+    ~name:
+      "between: \"opened here\" exactly when the closer's failure is reported"
+    ~print:(Printf.sprintf "%S")
+    Gen.(
+      string_size ~gen:(oneof_list [ '('; ')'; 'a'; 'b'; ' ' ]) (int_bound 6))
+    (fun s ->
+      let p = P.(between (char '(') (char ')') (many letter)) in
+      let n = String.length s in
+      let stop =
+        let rec go i =
+          if i < n && s.[i] >= 'a' && s.[i] <= 'z' then go (i + 1) else i
+        in
+        go 1
+      in
+      let closed = n > 0 && s.[0] = '(' && stop < n && s.[stop] = ')' in
+      let opened = n > 0 && s.[0] = '(' && not closed in
+      match P.parse_prefix p s with
+      | Ok _ -> closed
+      | Error [ d ] ->
+          P.Diagnostic.labels d
+          =
+          if opened then [ (P.Span.make ~start:0 ~stop:1, "opened here") ]
+          else []
+      | Error _ -> false)
+
 let () =
   Prop.run "engine"
     ([ outcomes_agree; errors_agree ~cuts:false; errors_agree ~cuts:true ]
@@ -341,4 +405,6 @@ let () =
         context_prop;
         phrasing;
         codes;
+        fail_annotations;
+        between_opened_here;
       ])

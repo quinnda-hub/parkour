@@ -25,6 +25,8 @@ module Make (I : INPUT) = struct
     kind : kind;
     span : Span.t option;  (** display span of a [Custom] error *)
     context : (string * int) list;  (** outermost first; start indices *)
+    labels : (Span.t * string) list;  (** secondary labels, source spans *)
+    notes : string list;
   }
 
   (* The constructs being parsed (see [context]), innermost first. One block
@@ -68,6 +70,8 @@ module Make (I : INPUT) = struct
       kind = Expect { items = Items items; unexpected = None };
       span = None;
       context = [];
+      labels = [];
+      notes = [];
     }
 
   let flatten e =
@@ -87,6 +91,8 @@ module Make (I : INPUT) = struct
     else if b.pos > a.pos then b
     else
       let context = if a.context <> [] then a.context else b.context in
+      let labels = if a.labels <> [] then a.labels else b.labels in
+      let notes = if a.notes <> [] then a.notes else b.notes in
       match (a.kind, b.kind) with
       | Custom _, _ -> { a with context }
       | _, Custom _ -> { b with context }
@@ -99,6 +105,8 @@ module Make (I : INPUT) = struct
             kind = Expect { items = Union (x.items, y.items); unexpected };
             span = None;
             context;
+            labels;
+            notes;
           }
 
   let join h1 h2 =
@@ -139,7 +147,8 @@ module Make (I : INPUT) = struct
     in
     let expected_diagnostic expected =
       let found, span = found_at st e.pos in
-      Diagnostic.make ~expected ~found ~context ~span
+      Diagnostic.make ~expected ~found ~context ~labels:e.labels ~notes:e.notes
+        ~span
         (expected_message expected found)
     in
     match e.kind with
@@ -147,7 +156,7 @@ module Make (I : INPUT) = struct
         match (flatten items, unexpected) with
         | [], Some stop when stop > e.pos ->
             let found = I.describe st.input e.pos stop in
-            Diagnostic.make ~found ~context
+            Diagnostic.make ~found ~context ~labels:e.labels ~notes:e.notes
               ~span:(source_span st e.pos stop)
               ("unexpected " ^ found)
         | expected, _ -> expected_diagnostic expected)
@@ -157,7 +166,8 @@ module Make (I : INPUT) = struct
           | Some s -> s
           | None -> Span.point (I.span st.input e.pos).start
         in
-        Diagnostic.make ?code ~context ~span message
+        Diagnostic.make ?code ~context ~labels:e.labels ~notes:e.notes ~span
+          message
 
   (* The diagnostic for an error that is being recovered from: the active
      enclosing contexts that started before the error, then the error's own
@@ -232,11 +242,18 @@ module Make (I : INPUT) = struct
 
   let return x _ pos = pass x pos
 
-  let fail ?code message _ pos =
+  let fail ?code ?(labels = []) ?(notes = []) message _ pos =
     Fail
       {
         error =
-          { pos; kind = Custom { code; message }; span = None; context = [] };
+          {
+            pos;
+            kind = Custom { code; message };
+            span = None;
+            context = [];
+            labels;
+            notes;
+          };
         cut = false;
       }
 
@@ -382,6 +399,8 @@ module Make (I : INPUT) = struct
                 kind = Custom { code; message };
                 span = Some (source_span st pos r.pos);
                 context = [];
+                labels = [];
+                notes = [];
               }
             in
             Fail { error = with_hint r.hint e; cut = r.cut })
@@ -615,6 +634,8 @@ module Make (I : INPUT) = struct
                 kind = Expect { items = Items []; unexpected = Some r.pos };
                 span = None;
                 context = [];
+                labels = [];
+                notes = [];
               };
             cut = false;
           }
@@ -810,11 +831,46 @@ module Make (I : INPUT) = struct
               kind = Custom { code = None; message = chained_message };
               span = Some span;
               context = [];
+              labels = [];
+              notes = [];
             }
           in
           Fail { error = with_hint hint e; cut }
 
-  let between o c p = seq (seq o p (fun _ x -> x)) c (fun x _ -> x)
+  (* [seq (seq o p) c], except that a failure of [c] that is the reported
+     one points back at the opener. *)
+  let between o c p st pos =
+    match o st pos with
+    | Fail _ as r -> r
+    | Pass a -> (
+        match p st a.pos with
+        | Fail b ->
+            Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut }
+        | Pass b -> (
+            let cut = a.cut || b.cut in
+            let hint = keep b.pos (join a.hint b.hint) in
+            match c st b.pos with
+            | Pass d ->
+                Pass
+                  {
+                    value = b.value;
+                    pos = d.pos;
+                    cut = cut || d.cut;
+                    hint = keep d.pos (join hint d.hint);
+                  }
+            | Fail d ->
+                let error = with_hint hint d.error in
+                let error =
+                  if d.error.pos >= error.pos && a.pos > pos then
+                    {
+                      error with
+                      labels =
+                        error.labels
+                        @ [ (source_span st pos a.pos, "opened here") ];
+                    }
+                  else error
+                in
+                Fail { error; cut = cut || d.cut }))
 
   let chainl1 p op =
     let step = seq op p (fun f x -> (f, x)) in
