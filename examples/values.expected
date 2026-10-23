@@ -70,7 +70,7 @@ error: unit 'm' is given more than once
   |
 1 | 1h30m15m
   |   --- first given here
-  |      ^^^ duplicate
+  |      ^^^
 === duration: units out of order ===
 error: unit 'h' must come before 'm'
  --> gallery.txt:1:4

@@ -124,6 +124,7 @@ module type S = sig
 
   val fail :
     ?code:string ->
+    ?span:Span.t ->
     ?labels:(Span.t * string) list ->
     ?notes:string list ->
     string ->
@@ -132,9 +133,19 @@ module type S = sig
       message takes precedence over plain expectations at the same position.
       Does not commit.
 
-      [labels] and [notes] end up in the diagnostic (see {!Diagnostic.make}):
-      secondary spans, which you can get from {!spanned}, and hints, e.g.
-      [fail ~labels:[ (span, "first defined here") ] "duplicate key"]. *)
+      [span] is what the diagnostic underlines instead of the current position
+      (the failure is still at the current position, which is what decides
+      between failures). [labels] and [notes] end up in the diagnostic (see
+      {!Diagnostic.make}): secondary spans and hints. Spans can be had from
+      {!spanned}, so a check after parsing can point at both places:
+      {[
+      let* name, span = spanned identifier in
+      if Hashtbl.mem seen name then
+        fail ~span
+          ~labels:[ (Hashtbl.find seen name, "first defined here") ]
+          "duplicate key"
+      else return name
+      ]} *)
 
   val map : ('a -> 'b) -> 'a t -> 'b t
   val bind : 'a t -> ('a -> 'b t) -> 'b t
@@ -363,9 +374,10 @@ module type S = sig
 
   val between : _ t -> _ t -> 'a t -> 'a t
   (** [between open_ close p] is [open_ *> p <* close]. When [close] fails and
-      its failure is the one reported, the diagnostic gets a secondary label
-      ["opened here"] on the input [open_] consumed, so an unclosed bracket is
-      shown together with where it was opened. *)
+      its failure is the one reported and [p] consumed input, the diagnostic
+      gets a secondary label ["opened here"] on the input [open_] consumed, so
+      an unclosed bracket is shown together with where it was opened. (Right
+      after the opener, the caret already shows it.) *)
 
   (** {1:recovery Error recovery}
 

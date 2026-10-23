@@ -32,7 +32,8 @@ let field ~delim =
     | Some c when c <> delim && c <> '\r' && c <> '\n' ->
         fail
           ~labels:[ (span, "this field ends here") ]
-          (Printf.sprintf "unexpected '%c' after the closing quote" c)
+          (Printf.sprintf "unexpected %s after the closing quote"
+             (Expected.to_string (Literal (String.make 1 c))))
     | _ -> return text
   in
   let bare_field =

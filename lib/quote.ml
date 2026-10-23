@@ -15,7 +15,7 @@ let word_len s i = if is_ascii_word s.[i] then 1 else multibyte_len s i
 let literal s =
   let n = String.length s in
   let single = n = 1 || (n > 1 && multibyte_len s 0 = n) in
-  let q = if single then '\'' else '"' in
+  let q = if single && s <> "'" then '\'' else '"' in
   let b = Buffer.create (n + 2) in
   Buffer.add_char b q;
   let i = ref 0 in

@@ -3,16 +3,20 @@
 
 val literal : string -> string
 (** Quote source text for "expected" lists. A single character (one byte, or one
-    well-formed UTF-8 scalar) is single-quoted, anything else double-quoted:
+    well-formed UTF-8 scalar) is single-quoted (except an apostrophe), anything
+    else double-quoted:
     {v
     literal ";"   = {|';'|}
     literal "let" = {|"let"|}
     literal "é"   = {|'é'|}
+    literal "'"   = {|"'"|}
     v}
-    Escaped: newline, tab and carriage return as [\n], [\t], [\r]; backslash;
-    the active quote character; other control bytes and invalid UTF-8 bytes as a
-    lowercase [\xNN]. Printable ASCII and well-formed UTF-8 are kept verbatim.
-    The empty string is quoted with double quotes. *)
+    (A lone apostrophe is double-quoted, like a lone double quote is
+    single-quoted, so neither needs escaping.) Escaped: newline, tab and
+    carriage return as [\n], [\t], [\r]; backslash; the active quote character;
+    other control bytes and invalid UTF-8 bytes as a lowercase [\xNN]. Printable
+    ASCII and well-formed UTF-8 are kept verbatim. The empty string is quoted
+    with double quotes. *)
 
 val found : string -> int -> string * int
 (** [found s i], for [0 <= i < String.length s], describes the input at byte [i]

@@ -17,7 +17,7 @@ error: expected string, found '}'
   |                 ^ expected string
   = while parsing object, from 1:1
 === single-quoted string ===
-error: expected value, found '\''
+error: expected value, found "'"
  --> gallery.json:1:10
   |
 1 | {"name": 'parkour'}
@@ -28,7 +28,6 @@ error: expected string or '}', found "name"
  --> gallery.json:1:2
   |
 1 | {name: "parkour"}
-  | - opened here
   |  ^^^^ expected string or '}'
   = while parsing object, from 1:1
 === NaN ===

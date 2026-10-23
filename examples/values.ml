@@ -7,9 +7,9 @@
 
    What they show: [validate] turns a semantic check into an error that
    underlines exactly the offending part (leading zeros, month 13, February
-   30th); [spanned] and [Diagnostic.make] build errors with secondary labels
-   and notes when the library's own messages are not enough (a duplicated or
-   misordered duration unit). *)
+   30th); [spanned] and [fail ~span ~labels ~notes] build errors with secondary
+   labels and notes when the library's own messages are not enough (a
+   duplicated or misordered duration unit). *)
 
 open Parkour
 
@@ -147,9 +147,8 @@ let component =
      (n, List.find (fun u -> u.name = c) units))
 
 (* The checks need the whole list: a duplicate points back at the first
-   occurrence, a misordered unit explains the order. Both are built with
-   [Diagnostic.make] and recorded with [emit], which lets us choose the
-   underlined span, the secondary label and the note. *)
+   occurrence, a misordered unit explains the order. The failure underlines
+   the offending component. *)
 let check_order comps =
   let rec go seen = function
     | [] -> None
@@ -157,14 +156,14 @@ let check_order comps =
         match List.find_opt (fun ((_, v), _) -> v.name = u.name) seen with
         | Some (_, first) ->
             Some
-              (Diagnostic.make ~span ~label:"duplicate"
+              (fail ~span
                  ~labels:[ (first, "first given here") ]
                  (Printf.sprintf "unit '%c' is given more than once" u.name))
         | None -> (
             match seen with
             | ((_, prev), _) :: _ when prev.seconds <= u.seconds ->
                 Some
-                  (Diagnostic.make ~span
+                  (fail ~span
                      ~notes:
                        [ "write units from largest to smallest: d, h, m, s" ]
                      (Printf.sprintf "unit '%c' must come before '%c'" u.name
@@ -177,7 +176,7 @@ let check_order comps =
 let duration =
   let* comps = many1 component in
   match check_order comps with
-  | Some d -> emit d *> return 0
+  | Some failure -> failure
   | None ->
       return (List.fold_left (fun t ((n, u), _) -> t + (n * u.seconds)) 0 comps)
 

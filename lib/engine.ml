@@ -242,14 +242,14 @@ module Make (I : INPUT) = struct
 
   let return x _ pos = pass x pos
 
-  let fail ?code ?(labels = []) ?(notes = []) message _ pos =
+  let fail ?code ?span ?(labels = []) ?(notes = []) message _ pos =
     Fail
       {
         error =
           {
             pos;
             kind = Custom { code; message };
-            span = None;
+            span;
             context = [];
             labels;
             notes;
@@ -861,7 +861,8 @@ module Make (I : INPUT) = struct
             | Fail d ->
                 let error = with_hint hint d.error in
                 let error =
-                  if d.error.pos >= error.pos && a.pos > pos then
+                  if d.error.pos >= error.pos && a.pos > pos && b.pos > a.pos
+                  then
                     {
                       error with
                       labels =

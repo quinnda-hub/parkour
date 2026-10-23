@@ -345,9 +345,12 @@ let fail_annotations =
         (String.concat "," notes))
     gen_annotations
     (fun (labels, notes) ->
-      let boom = P.fail ~labels ~notes "boom" in
+      let span = P.Span.make ~start:(List.length labels) ~stop:7 in
+      let boom = P.fail ~span ~labels ~notes "boom" in
       let same d =
-        P.Diagnostic.labels d = labels && P.Diagnostic.notes d = notes
+        P.Diagnostic.labels d = labels
+        && P.Diagnostic.notes d = notes
+        && P.Diagnostic.span d = span
       in
       let recovered =
         P.(
@@ -367,7 +370,8 @@ let fail_annotations =
 let between_opened_here =
   Prop.test
     ~name:
-      "between: \"opened here\" exactly when the closer's failure is reported"
+      "between: \"opened here\" exactly when the closer's failure is reported \
+       and the body consumed"
     ~print:(Printf.sprintf "%S")
     Gen.(
       string_size ~gen:(oneof_list [ '('; ')'; 'a'; 'b'; ' ' ]) (int_bound 6))
@@ -381,7 +385,7 @@ let between_opened_here =
         go 1
       in
       let closed = n > 0 && s.[0] = '(' && stop < n && s.[stop] = ')' in
-      let opened = n > 0 && s.[0] = '(' && not closed in
+      let opened = n > 0 && s.[0] = '(' && (not closed) && stop > 1 in
       match P.parse_prefix p s with
       | Ok _ -> closed
       | Error [ d ] ->

@@ -153,7 +153,7 @@ let literal_shape =
     ~print:print_string gen_string (fun s ->
       let q = Quote.literal s in
       let n = String.length q in
-      let q0 = if is_single s then '\'' else '"' in
+      let q0 = if is_single s && s <> "'" then '\'' else '"' in
       n >= 2
       && q.[0] = q0
       && q.[n - 1] = q0
