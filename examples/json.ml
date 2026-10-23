@@ -84,20 +84,14 @@ and obj =
 
 let json = ws *> force value
 
-(* Diagnostics are plain data; this prints the message and the context. *)
+(* Diagnostics are plain data; [Diagnostic.render] turns them into a report
+   with a source excerpt. *)
 let report name src =
   match parse json src with
   | Ok _ -> Printf.printf "%s: ok\n" name
   | Error diagnostics ->
-      List.iter
-        (fun d ->
-          Format.printf "%s: %a@." name Diagnostic.pp d;
-          List.iter
-            (fun (construct, span) ->
-              Format.printf "  while parsing %s (from %a)@." construct Span.pp
-                span)
-            (Diagnostic.context d))
-        diagnostics
+      let source = Source.make ~name src in
+      List.iter (fun d -> print_string (Diagnostic.render source d)) diagnostics
 
 let samples =
   [
@@ -119,4 +113,7 @@ let () =
       let src = really_input_string ic (in_channel_length ic) in
       close_in ic;
       report file src
-  | _ -> List.iter (fun src -> report (Printf.sprintf "%S" src) src) samples
+  | _ ->
+      List.iteri
+        (fun i src -> report (Printf.sprintf "sample%d.json" (i + 1)) src)
+        samples

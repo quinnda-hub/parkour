@@ -1,0 +1,184 @@
+=== single line, expectations (label shown) ===
+error: expected integer, found "banana"
+ --> config.txt:1:8
+  |
+1 | ammo = banana
+  |        ^^^^^^ expected integer
+  = while parsing assignment, from 1:1
+=== two expectations, no file name ===
+error: expected ',' or ';', found '!'
+ --> 1:4
+  |
+1 | abc!
+  |    ^ expected ',' or ';'
+=== custom error with code (no label) ===
+error[E42]: value out of range
+ --> limits.cfg:1:1
+  |
+1 | 300
+  | ^^^
+=== warning ===
+warning[W1]: deprecated comment style
+ --> a.txt:1:7
+  |
+1 | x = 1 # old
+  |       ^^^^^
+=== unexpected only (not_followed_by) ===
+error: unexpected "let"
+ --> 1:1
+  |
+1 | let x
+  | ^^^
+=== end of input after a trailing newline: empty last line ===
+error: expected 'b', found end of input
+ --> 2:1
+  |
+2 |
+  | ^ expected 'b'
+=== end of input without trailing newline ===
+error: expected 'b', found end of input
+ --> 1:2
+  |
+1 | a
+  |  ^ expected 'b'
+=== empty input ===
+error: expected 'a', found end of input
+ --> 1:1
+  |
+1 |
+  | ^ expected 'a'
+=== multi-line span, 4 lines (no elision) ===
+error: block is not allowed here
+ --> 1:1
+  |
+1 | first line
+  | ^^^^^^^^^^
+2 | second line
+  | ^^^^^^^^^^^
+3 | third line
+  | ^^^^^^^^^^
+4 | fourth
+  | ^^^^^^
+=== multi-line span, more than 4 lines (elided, 2-digit gutter) ===
+error: block is not allowed here
+  --> 1:1
+   |
+ 1 | line 1
+   | ^^^^^^
+ 2 | line 2
+   | ^^^^^^
+...
+11 | line 11
+   | ^^^^^^^
+=== tabs expanded (tab_width 4) ===
+error: expected integer
+ --> 1:8
+  |
+1 |     key =   oops
+  |             ^^^^ expected integer
+=== tabs expanded (tab_width 8) ===
+error: bad value
+ --> 1:8
+  |
+1 |         key     =       oops
+  |                         ^^^^
+=== wide (CJK) chars and a combining character before the span ===
+error: bad value
+ --> 1:9
+  |
+1 | 名前 = é 値!
+  |          ^^^
+=== CRLF input ===
+error: expected integer, found 'x'
+ --> crlf.txt:2:5
+  |
+2 | b = x
+  |     ^ expected integer
+=== invalid UTF-8 and control characters in the line ===
+error: unexpected bytes
+ --> 1:4
+  |
+1 | ok �� ␁ ␡ ␍ end
+  |    ^^^^^^
+=== very long line: window cut on both sides ===
+error: bad word
+ --> 1:151
+  |
+1 | …aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaBADbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…
+  |                                  ^^^
+=== long line, max_width 40, cut on the left only ===
+error: unexpected end
+ --> 1:304
+  |
+1 | …bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  |                                        ^
+=== long line, max_width 40, cut on the right only ===
+error: bad start
+ --> 1:1
+  |
+1 | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…
+  | ^
+=== multi-line span from mid-line 1 to mid-line 3, with expectations ===
+error: bad expression
+ --> 1:9
+  |
+1 | let x = (1 +
+  |         ^^^^
+2 |   2 *
+  | ^^^^^
+3 |   3) end
+  | ^^^^ expected expression or ';'
+=== C1 control and U+202E shown as U+FFFD ===
+error: bad text
+ --> 1:4
+  |
+1 | a�b�Z
+  |    ^
+=== context trimming: 5 frames, default max_context ===
+error: bad
+ --> 1:7
+  |
+1 | abcdefgh
+  |       ^
+  = while parsing level 1, from 1:1
+  = while parsing level 2, from 1:1
+  = ... and 2 more
+  = while parsing level 5, from 1:1
+=== context: 5 frames, max_context 4 (nothing omitted) ===
+error: bad
+ --> 1:7
+  |
+1 | abcdefgh
+  |       ^
+  = while parsing level 1, from 1:1
+  = while parsing level 2, from 1:1
+  = while parsing level 3, from 1:1
+  = while parsing level 4, from 1:1
+  = while parsing level 5, from 1:1
+=== location style: char offset, with name ===
+error: bad value
+ --> loc.txt, char 10
+  |
+1 | café = éé oops
+  |           ^^^^
+=== location style: byte offset, no name ===
+error: bad value
+ --> byte 13
+  |
+1 | café = éé oops
+  |           ^^^^
+=== colour (escape bytes shown as \e) ===
+\e[1;31merror[E1]\e[0m: \e[1mexpected integer or '-', found "banana"\e[0m
+ \e[1;34m-->\e[0m 1:8
+  \e[1;34m|\e[0m
+\e[1;34m1\e[0m \e[1;34m|\e[0m ammo = banana
+  \e[1;34m|\e[0m        \e[1;31m^^^^^^ expected integer or '-'\e[0m
+  \e[1;34m=\e[0m while parsing assignment, from 1:1
+=== compact pp: with source (named) ===
+f.txt:2:6: error[E7]: bad value
+=== compact pp: with source (unnamed, char offset) ===
+char 14: error[E7]: bad value
+=== compact pp: without source ===
+bytes 15-19: error[E7]: bad value
+=== compact pp: without source, empty span, warning ===
+byte 5: warning: odd

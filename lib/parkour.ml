@@ -1,5 +1,6 @@
 module Span = Span
 module Expected = Expected
+module Source = Source
 module Diagnostic = Diagnostic
 
 exception Grammar_error = Parkour_intf.Grammar_error

@@ -251,7 +251,7 @@ let gen_diag =
       (pair (option (oneof_list [ "E42"; "W1" ])) span_gen))
 
 let diag_props =
-  Prop.test ~name:"Diagnostic.make: sorted dedup expected, pp format"
+  Prop.test ~name:"Diagnostic.make: sorted dedup expected, compact pp format"
     ~print:(fun (_, ex, _, _) -> Print.list print_expected ex)
     gen_diag
     (fun (is_err, ex, code, span) ->
@@ -267,10 +267,11 @@ let diag_props =
       && List.for_all (fun e -> List.exists (Expected.equal e) ex) got
       && Diagnostic.is_error d = is_err
       && Format.asprintf "%a" Diagnostic.pp d
-         = Printf.sprintf "%s%s at %d-%d: msg"
+         = Printf.sprintf "%s: %s%s: msg"
+             (if span.start = span.stop then Printf.sprintf "byte %d" span.start
+              else Printf.sprintf "bytes %d-%d" span.start span.stop)
              (if is_err then "error" else "warning")
-             (match code with None -> "" | Some c -> "[" ^ c ^ "]")
-             span.start span.stop)
+             (match code with None -> "" | Some c -> "[" ^ c ^ "]"))
 
 let () =
   Prop.run "support_modules"

@@ -16,3 +16,7 @@ val compare : t -> t -> int
 
 val to_string : t -> string
 (** Human form used in messages, with quoting and escaping applied. *)
+
+val list_to_string : t list -> string
+(** Joins the human forms as ["X"], ["X or Y"] or ["X, Y, or Z"]; empty for an
+    empty list. *)

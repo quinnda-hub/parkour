@@ -104,15 +104,12 @@ module Make (I : INPUT) = struct
     else ("end of input", I.span st.input st.len)
 
   let expected_message items found =
-    match List.map Expected.to_string items with
+    match items with
     | [] -> "unexpected " ^ found
-    | [ a ] -> Printf.sprintf "expected %s, found %s" a found
-    | [ a; b ] -> Printf.sprintf "expected %s or %s, found %s" a b found
-    | l ->
-        let rev = List.rev l in
-        Printf.sprintf "expected %s, or %s, found %s"
-          (String.concat ", " (List.rev (List.tl rev)))
-          (List.hd rev) found
+    | _ ->
+        Printf.sprintf "expected %s, found %s"
+          (Expected.list_to_string items)
+          found
 
   let to_diagnostic st e =
     let context =

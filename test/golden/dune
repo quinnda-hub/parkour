@@ -1,0 +1,16 @@
+; Golden tests for Diagnostic.render / Diagnostic.pp. Accept changes with
+; `dune promote`.
+
+(executable
+ (name golden_render)
+ (libraries parkour))
+
+(rule
+ (with-stdout-to
+  render.output
+  (run %{exe:golden_render.exe})))
+
+(rule
+ (alias runtest)
+ (action
+  (diff render.expected render.output)))

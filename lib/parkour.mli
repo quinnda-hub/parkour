@@ -16,10 +16,14 @@
          (name, int_of_string value))
 
     let () =
-      match parse assignment "ammo = banana" with
+      let input = "ammo = banana" in
+      match parse assignment input with
       | Ok (name, n) -> Printf.printf "%s = %d\n" name n
       | Error diagnostics ->
-          List.iter (Format.printf "%a@." Diagnostic.pp) diagnostics
+          let source = Source.make ~name:"config" input in
+          List.iter
+            (fun d -> print_string (Diagnostic.render source d))
+            diagnostics
     ]}
 
     The top level of this module is the parser over [string] input; see
@@ -28,6 +32,10 @@
 
 module Span = Span
 module Expected = Expected
+
+module Source = Source
+(** Source text with a line index, for positions and rendering. *)
+
 module Diagnostic = Diagnostic
 
 exception Grammar_error of string

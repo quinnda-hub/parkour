@@ -1,10 +1,17 @@
 (** Structured problem reports.
 
     A diagnostic is data: where the problem is, what went wrong, what was
-    expected, what was found, and which constructs were being parsed. Turning it
-    into text with source excerpts is a separate step (rendering arrives with
-    [Source] in the next milestone), so tools such as editors can consume the
-    structured fields directly. *)
+    expected, what was found, and which constructs were being parsed. Tools such
+    as editors can consume these fields directly; {!render} turns a diagnostic
+    into a human-readable report with a source excerpt:
+    {v
+    error: expected integer, found "banana"
+     --> config.txt:4:8
+      |
+    4 | ammo = banana
+      |        ^^^^^^ expected integer
+      = while parsing assignment, from 4:1
+    v} *)
 
 type severity = [ `Error | `Warning ]
 type t
@@ -48,5 +55,52 @@ val make :
 
 val is_error : t -> bool
 
+(** {1 Printing} *)
+
+type location = [ `Line_column | `Char_offset | `Byte_offset ]
+(** How positions are shown: [4:8] (line and column, the default), [char 52]
+    (characters from the start) or [byte 57]. *)
+
 val pp : Format.formatter -> t -> unit
-(** Compact single-line form: [error[code] at 12-18: message]. *)
+(** Compact single-line form with byte positions:
+    [bytes 57-63: error[E42]: message] ([byte 57] for an empty span). *)
+
+val pp_located : ?location:location -> Source.t -> Format.formatter -> t -> unit
+(** Compact single-line form with real positions, as used by compilers and
+    understood by editors: [config.txt:4:8: error[E42]: message]. Use it as
+    [Format.printf "%a" (Diagnostic.pp_located source) d]. *)
+
+val render :
+  ?location:location ->
+  ?color:bool ->
+  ?max_context:int ->
+  ?tab_width:int ->
+  ?max_width:int ->
+  Source.t ->
+  t ->
+  string
+(** Multi-line report with a source excerpt, in the style shown above.
+    - [color] (default [false]) adds ANSI colours.
+    - [max_context] (default [2]): how many of the innermost {!context} frames
+      to show; the outermost frame is shown too, and the number of omitted
+      frames is noted.
+    - [tab_width] (default [4]) for aligning underlines after tabs.
+    - [max_width] (default [100]): source lines wider than this many columns are
+      shown as a window around the problem, with […] marking the cuts.
+
+    Underlines are aligned for wide (e.g. CJK) and zero-width (combining)
+    characters using a built-in approximation of terminal widths. The result
+    ends with a newline. *)
+
+val pp_rendered :
+  ?location:location ->
+  ?color:bool ->
+  ?max_context:int ->
+  ?tab_width:int ->
+  ?max_width:int ->
+  Source.t ->
+  Format.formatter ->
+  t ->
+  unit
+(** {!render} for [Format]. It prints a multi-line block ending in a newline, so
+    it is meant for top-level use, not inside [Format] boxes. *)
