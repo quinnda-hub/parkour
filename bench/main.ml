@@ -1,6 +1,6 @@
 (* Benchmarks: Parkour against other OCaml parsers.
 
-   dune exec --profile release bench/main.exe -- [--quick] [--errors]
+   dune exec --profile bench bench/main.exe -- [--quick] [--errors]
 
    Without flags: a throughput/allocation table (MB/s and minor words per input
    byte) for JSON and for arithmetic expressions. [--quick] shortens the time

@@ -41,7 +41,7 @@ Development:
   dune test               fast test tier
   dune build @test-long   extensive test tier (QCheck --long)
   dune fmt                format the sources
-  bench/fetch.sh && dune exec --profile release bench/main.exe
+  bench/fetch.sh && dune exec --profile bench bench/main.exe
                           benchmarks (unpackaged; fetch.sh downloads the inputs)
 
 See CHANGES for the release notes. License: MIT (see LICENSE).
