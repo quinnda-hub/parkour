@@ -28,6 +28,11 @@ let make ?(line_comments = []) ?(block_comments = []) ?(nested_comments = false)
     ?(ident_char = fun c -> is_alnum c || c = '_') ?(reserved = []) () =
   if List.mem "" line_comments then invalid "empty line comment delimiter";
   List.iter
+    (fun o ->
+      if String.contains o '\n' || String.contains o '\r' then
+        invalid "line comment delimiter %S contains a newline" o)
+    line_comments;
+  List.iter
     (fun (o, c) ->
       if o = "" || c = "" then invalid "empty block comment delimiter";
       if nested_comments && o = c then

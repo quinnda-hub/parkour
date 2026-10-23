@@ -652,6 +652,22 @@ let make_validation =
           P.Lexeme.make ~block_comments:[ ("|", "|") ] ~nested_comments:true ())
       && not (bad (fun () -> P.Lexeme.make ~block_comments:[ ("|", "|") ] ())))
 
+let make_rejects_newline_openers =
+  Prop.test ~name:"Lexeme.make rejects line comment openers with a newline"
+    ~print:String.escaped
+    Gen.(
+      string_size ~gen:(oneof_list [ '#'; '/'; '\n'; '\r'; 'x' ]) (int_bound 4))
+    (fun opener ->
+      let rejected =
+        match P.Lexeme.make ~line_comments:[ "//"; opener ] () with
+        | exception Invalid_argument _ -> true
+        | _ -> false
+      in
+      rejected
+      = (opener = ""
+        || String.contains opener '\n'
+        || String.contains opener '\r'))
+
 (* Utf8 *)
 
 let utf8_any_valid =
@@ -811,6 +827,7 @@ let () =
         keyword_prop;
         identifier_prop;
         make_validation;
+        make_rejects_newline_openers;
         utf8_any_valid;
         utf8_any_invalid;
         utf8_single;

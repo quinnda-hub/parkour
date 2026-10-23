@@ -24,10 +24,11 @@ end
 
 include Engine.Make (String_input)
 
-let tokenize ?(skip = return ()) tok text =
-  match parse (skip *> many (spanned tok <* skip) <* eof) text with
-  | Ok l -> Ok (Array.of_list l)
-  | Error _ as e -> e
+let tokens ?(skip = return ()) tok =
+  map Array.of_list (skip *> many (spanned tok <* skip))
+
+let tokenize ?skip ?max_depth ?max_errors tok text =
+  parse ?max_depth ?max_errors (tokens ?skip tok) text
 
 let char = token
 let any_char = any
@@ -86,16 +87,14 @@ let skip_line st pos =
 
 (* A custom failure at [pos] whose diagnostic underlines [start, stop). *)
 let custom_fail pos ~start ~stop message =
-  Fail
+  let error =
     {
-      error =
-        {
-          pos;
-          kind = Custom { code = None; message };
-          extra = { no_extra with span = Some (Span.make ~start ~stop) };
-        };
-      cut = false;
+      pos;
+      kind = Custom { code = None; message };
+      extra = { no_extra with span = Some (Span.make ~start ~stop) };
     }
+  in
+  Fail { error; cut = false }
 
 (* Character classes (ASCII only) *)
 
@@ -142,7 +141,7 @@ let newline =
       | _ -> fail_kind pos kind
     else fail_kind pos kind
 
-let whitespace = hidden (skip_while is_space)
+let whitespace = trivia (skip_while is_space)
 
 let string_ci lit =
   let n = String.length lit in

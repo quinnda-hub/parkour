@@ -171,6 +171,31 @@ let stack_safety =
       && P.parse (P.fold_many (fun n _ -> n + 1) 0 a) as_ = Ok big
       && ok_len big (P.parse (P.many_till a (P.char '!')) (as_ ^ "!")))
 
+(* [sep_end_by1] against a model: [a (, a)* ,?] as far as it matches. *)
+let sep_end_by1_model s =
+  let n = String.length s in
+  let at i c = i < n && s.[i] = c in
+  if not (at 0 'a') then None
+  else
+    let rec go count i =
+      if at i ',' && at (i + 1) 'a' then go (count + 1) (i + 2)
+      else if at i ',' then (count, i + 1)
+      else (count, i)
+    in
+    Some (go 1 1)
+
+let sep_end_by1_prop =
+  Prop.test
+    ~name:"sep_end_by1 matches one or more items and a trailing separator"
+    ~print:String.escaped
+    Gen.(string_size ~gen:(oneof_list [ 'a'; 'a'; ','; 'x' ]) (int_bound 10))
+    (fun s ->
+      let p = P.sep_end_by1 ~sep:(P.char ',') (P.char 'a') in
+      match (P.parse_prefix p s, sep_end_by1_model s) with
+      | Ok (l, pos), Some (count, stop) -> List.length l = count && pos = stop
+      | Error _, None -> true
+      | _ -> false)
+
 (* f. depth *)
 
 let nest =
@@ -480,6 +505,7 @@ let () =
     @ [
         cut_never_changes_success;
         stack_safety;
+        sep_end_by1_prop;
         depth_limit;
         depth_default;
         spanned_prop;

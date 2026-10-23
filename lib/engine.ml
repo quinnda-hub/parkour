@@ -58,6 +58,8 @@ module Make (I : INPUT) = struct
     mutable frames : frames;
     mutable trivia_start : int;
     mutable trivia_stop : int;
+    mutable deepest : int;
+    mutable deepest_pos : int;
   }
 
   (* [cut]: a commitment point was crossed inside this parser.
@@ -134,6 +136,9 @@ module Make (I : INPUT) = struct
     | Some a, Some b -> Some (merge a b)
 
   let with_hint hint e = match hint with None -> e | Some h -> merge h e
+
+  (* A failure of a continuation, after the hint of what preceded it. *)
+  let fail_hinted hint error cut = Fail { error = with_hint hint error; cut }
   let keep pos = function Some h as hint when h.pos >= pos -> hint | _ -> None
 
   (* [keep pos (join h1 h2)], without merging hints that are dropped anyway. *)
@@ -237,14 +242,24 @@ module Make (I : INPUT) = struct
       end
     end
 
-  (* Remember that [start, stop) was skipped as trivia. *)
+  (* Remember that [start, stop) was skipped as trivia; a range that starts
+     where the current one ends extends it. *)
   let note_trivia st start stop =
-    st.trivia_start <- start;
+    if start <> st.trivia_stop then st.trivia_start <- start;
     st.trivia_stop <- stop
 
+  (* Backtracking points save the log, the error count and the trivia range
+     before running a branch, and [rollback] them if the branch is abandoned.
+     [restore] is for primitives that cannot leave trivia behind. *)
   let restore st log errors =
     st.log <- log;
     st.errors <- errors
+
+  let rollback st log errors trivia_start trivia_stop =
+    st.log <- log;
+    st.errors <- errors;
+    st.trivia_start <- trivia_start;
+    st.trivia_stop <- trivia_stop
 
   let run max_depth max_errors p input =
     if max_errors < 1 then invalid_arg "Parkour: max_errors must be positive";
@@ -260,7 +275,14 @@ module Make (I : INPUT) = struct
         frames = No_frame;
         trivia_start = 0;
         trivia_stop = 0;
+        deepest = 0;
+        deepest_pos = 0;
       }
+    in
+    let abort pos message =
+      let span = Span.point (I.span st.input (min pos st.len)).start in
+      record ~found:(Some span.start) st (Diagnostic.make ~span message);
+      None
     in
     let value =
       match p st 0 with
@@ -271,12 +293,12 @@ module Make (I : INPUT) = struct
             st (to_diagnostic st r.error);
           None
       | exception Too_deep pos ->
-          let span = Span.point (I.span st.input (min pos st.len)).start in
-          record ~found:(Some span.start) st
-            (Diagnostic.make ~span
-               (Printf.sprintf "nesting too deep (more than %d levels)"
-                  max_depth));
-          None
+          abort pos
+            (Printf.sprintf "nesting too deep (more than %d levels)" max_depth)
+      | exception Stack_overflow ->
+          abort st.deepest_pos
+            (Printf.sprintf "nesting too deep (stack exhausted after %d levels)"
+               st.deepest)
     in
     let start d = (Diagnostic.span d).start in
     ( value,
@@ -289,16 +311,14 @@ module Make (I : INPUT) = struct
   let return x _ pos = pass x pos
 
   let fail ?code ?span ?(labels = []) ?(notes = []) message _ pos =
-    Fail
+    let error =
       {
-        error =
-          {
-            pos;
-            kind = Custom { code; message };
-            extra = { no_extra with span; labels; notes };
-          };
-        cut = false;
+        pos;
+        kind = Custom { code; message };
+        extra = { no_extra with span; labels; notes };
       }
+    in
+    Fail { error; cut = false }
 
   let map f p st pos =
     match p st pos with
@@ -321,8 +341,7 @@ module Make (I : INPUT) = struct
                 cut = a.cut || b.cut;
                 hint = keep_join b.pos a.hint b.hint;
               }
-        | Fail b ->
-            Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut })
+        | Fail b -> fail_hinted a.hint b.error (a.cut || b.cut))
 
   let bind p f st pos =
     match p st pos with
@@ -338,8 +357,7 @@ module Make (I : INPUT) = struct
                 cut = a.cut || b.cut;
                 hint = keep_join b.pos a.hint b.hint;
               }
-        | Fail b ->
-            Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut })
+        | Fail b -> fail_hinted a.hint b.error (a.cut || b.cut))
 
   let both p q = seq p q (fun a b -> (a, b))
 
@@ -348,11 +366,12 @@ module Make (I : INPUT) = struct
      were not taken are no longer relevant to the report. *)
   let alt p q st pos =
     let log = st.log and errors = st.errors in
+    let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
     match p st pos with
     | Pass _ as r -> r
     | Fail { cut = true; _ } as r -> r
     | Fail a -> (
-        restore st log errors;
+        rollback st log errors trivia_start trivia_stop;
         match q st pos with
         | Pass b when not b.cut ->
             Pass
@@ -374,10 +393,12 @@ module Make (I : INPUT) = struct
      the failure said (unless it is a custom message). *)
   let label name p =
     let described = expect_kind [ Expected.Label name ] in
-    let relabel e =
-      match e.kind with
-      | Expect _ -> { e with kind = described }
-      | Custom _ -> e
+    let relabel pos e =
+      if e.pos <> pos then e
+      else
+        match e.kind with
+        | Expect _ -> { e with kind = described }
+        | Custom _ -> e
     in
     fun st pos ->
       match p st pos with
@@ -387,15 +408,38 @@ module Make (I : INPUT) = struct
               value = r.value;
               pos = r.pos;
               cut = r.cut;
-              hint = Some (relabel h);
+              hint = Some (relabel pos h);
             }
       | Fail r when r.error.pos = pos ->
-          Fail { error = relabel r.error; cut = r.cut }
+          Fail { error = relabel pos r.error; cut = r.cut }
       | r -> r
 
   (* [hidden] contributes nothing to later errors when it succeeds, and no
-     expectations when it fails at its start position. *)
+     expectations when it fails at its start position. It does not mark
+     trivia: see [trivia]. *)
+  let hide pos e =
+    if e.pos <> pos then e
+    else
+      match e.kind with
+      | Expect { unexpected; _ } ->
+          { e with kind = Expect { items = Items []; unexpected } }
+      | Custom _ -> e
+
+  let hide_failure r pos =
+    match r with
+    | Fail r when r.error.pos = pos ->
+        Fail { error = hide pos r.error; cut = r.cut }
+    | r -> r
+
   let hidden p st pos =
+    match p st pos with
+    | Pass { hint = Some _; value; pos = stop; cut } ->
+        Pass { value; pos = stop; cut; hint = None }
+    | Fail _ as r -> hide_failure r pos
+    | r -> r
+
+  (* [hidden], and what it consumed is remembered as the last trivia range. *)
+  let trivia p st pos =
     match p st pos with
     | Pass { hint = Some _; value; pos = stop; cut } ->
         if stop > pos then note_trivia st pos stop;
@@ -403,14 +447,7 @@ module Make (I : INPUT) = struct
     | Pass { pos = stop; _ } as r ->
         if stop > pos then note_trivia st pos stop;
         r
-    | Fail { error = { kind = Expect { unexpected; _ }; _ } as e; cut }
-      when e.pos = pos ->
-        Fail
-          {
-            error = { e with kind = Expect { items = Items []; unexpected } };
-            cut;
-          }
-    | r -> r
+    | Fail _ as r -> hide_failure r pos
 
   (* Frames are recorded only for failures past the construct's start: a
      construct that failed on its first token was never really entered (that
@@ -439,7 +476,9 @@ module Make (I : INPUT) = struct
             hint = Some (add_frame name pos h);
           }
     | Pass _ as r -> r
-    | Fail r -> Fail { error = add_frame name pos r.error; cut = r.cut }
+    | Fail r as reply ->
+        let error = add_frame name pos r.error in
+        if error == r.error then reply else Fail { error; cut = r.cut }
 
   let validate ?code check p st pos =
     match p st pos with
@@ -455,7 +494,7 @@ module Make (I : INPUT) = struct
                 extra = { no_extra with span = Some (source_span st pos r.pos) };
               }
             in
-            Fail { error = with_hint r.hint e; cut = r.cut })
+            fail_hinted r.hint e r.cut)
 
   (* Operators *)
 
@@ -501,7 +540,7 @@ module Make (I : INPUT) = struct
         | e :: rest -> List.fold_left merge e rest)
 
   (* [go] is a top-level function, not a closure made on each call. *)
-  let rec choice_go st pos log errors furthest errs = function
+  let rec choice_go st pos log errors tstart tstop furthest errs = function
     | [] ->
         let error =
           match errs with [] -> expect_error pos [] | _ -> merge_all errs
@@ -520,17 +559,20 @@ module Make (I : INPUT) = struct
                     hint = keep_join r.pos (Some (merge_all errs)) r.hint;
                   })
         | Fail r when not r.cut ->
-            restore st log errors;
+            rollback st log errors tstart tstop;
             let e = r.error in
             if e.pos > furthest then
-              choice_go st pos log errors e.pos [ e ] rest
+              choice_go st pos log errors tstart tstop e.pos [ e ] rest
             else if e.pos = furthest then
-              choice_go st pos log errors furthest (e :: errs) rest
-            else choice_go st pos log errors furthest errs rest
+              choice_go st pos log errors tstart tstop furthest (e :: errs) rest
+            else choice_go st pos log errors tstart tstop furthest errs rest
         | r -> r)
 
   let choice ?label:name ps =
-    let p st pos = choice_go st pos st.log st.errors (-1) [] ps in
+    let p st pos =
+      choice_go st pos st.log st.errors st.trivia_start st.trivia_stop (-1) []
+        ps
+    in
     match name with None -> p | Some name -> label name p
 
   (* Repetition. Each loop is tail-recursive. An uncommitted failure ends the
@@ -547,14 +589,15 @@ module Make (I : INPUT) = struct
   (* [fold_go] is a top-level function, not a closure made on each call. *)
   let rec fold_go name f p st acc pos cut hint =
     let log = st.log and errors = st.errors in
+    let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
     match p st pos with
     | Pass r ->
         if r.pos = pos then zero_width name pos;
         fold_go name f p st (f acc r.value) r.pos (cut || r.cut)
           (keep_join r.pos hint r.hint)
-    | Fail r when r.cut -> Fail { error = with_hint hint r.error; cut = true }
+    | Fail r when r.cut -> fail_hinted hint r.error true
     | Fail r ->
-        restore st log errors;
+        rollback st log errors trivia_start trivia_stop;
         Pass
           { value = acc; pos; cut; hint = keep pos (join hint (Some r.error)) }
 
@@ -583,11 +626,11 @@ module Make (I : INPUT) = struct
     let rest st pos0 =
       let rec go acc pos cut hint =
         let log = st.log and errors = st.errors in
+        let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
         match sep st pos with
-        | Fail r when r.cut ->
-            Fail { error = with_hint hint r.error; cut = true }
+        | Fail r when r.cut -> fail_hinted hint r.error true
         | Fail r ->
-            restore st log errors;
+            rollback st log errors trivia_start trivia_stop;
             Pass
               {
                 value = acc;
@@ -598,15 +641,16 @@ module Make (I : INPUT) = struct
         | Pass s -> (
             let cut = cut || s.cut and hint = keep_join s.pos hint s.hint in
             let log = st.log and errors = st.errors in
+            let trivia_start = st.trivia_start
+            and trivia_stop = st.trivia_stop in
             match p st s.pos with
             | Pass r ->
                 if r.pos = pos then zero_width name pos;
                 go (r.value :: acc) r.pos (cut || r.cut)
                   (keep_join r.pos hint r.hint)
-            | Fail r when r.cut ->
-                Fail { error = with_hint hint r.error; cut = true }
+            | Fail r when r.cut -> fail_hinted hint r.error true
             | Fail r ->
-                restore st log errors;
+                rollback st log errors trivia_start trivia_stop;
                 Pass
                   {
                     value = acc;
@@ -632,8 +676,7 @@ module Make (I : INPUT) = struct
           | Pass r ->
               go (i - 1) (r.value :: acc) r.pos (cut || r.cut)
                 (keep_join r.pos hint r.hint)
-          | Fail r ->
-              Fail { error = with_hint hint r.error; cut = cut || r.cut }
+          | Fail r -> fail_hinted hint r.error (cut || r.cut)
       in
       go n [] pos0 false None
 
@@ -642,6 +685,7 @@ module Make (I : INPUT) = struct
   let many_till p stop st pos0 =
     let rec go acc pos cut hint =
       let log = st.log and errors = st.errors in
+      let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
       match stop st pos with
       | Pass s ->
           Pass
@@ -651,19 +695,17 @@ module Make (I : INPUT) = struct
               cut = cut || s.cut;
               hint = keep_join s.pos hint s.hint;
             }
-      | Fail s when s.cut -> Fail { error = with_hint hint s.error; cut = true }
+      | Fail s when s.cut -> fail_hinted hint s.error true
       | Fail s -> (
-          restore st log errors;
+          rollback st log errors trivia_start trivia_stop;
           match p st pos with
           | Pass r ->
               if r.pos = pos then zero_width "many_till" pos;
               let hint = if r.cut then hint else join hint (Some s.error) in
               go (r.value :: acc) r.pos (cut || r.cut)
                 (keep_join r.pos hint r.hint)
-          | Fail r when r.cut ->
-              Fail { error = with_hint hint r.error; cut = true }
-          | Fail r ->
-              Fail { error = with_hint hint (merge s.error r.error); cut })
+          | Fail r when r.cut -> fail_hinted hint r.error true
+          | Fail r -> fail_hinted hint (merge s.error r.error) cut)
     in
     go [] pos0 false None
 
@@ -679,29 +721,29 @@ module Make (I : INPUT) = struct
 
   let lookahead p st pos =
     let log = st.log and errors = st.errors in
+    let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
     let reply = p st pos in
-    restore st log errors;
+    rollback st log errors trivia_start trivia_stop;
     match reply with
     | Pass r -> pass r.value pos
     | Fail r -> Fail { r with cut = false }
 
   let not_followed_by p st pos =
     let log = st.log and errors = st.errors in
+    let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
     let reply = p st pos in
-    restore st log errors;
+    rollback st log errors trivia_start trivia_stop;
     match reply with
     | Fail _ -> pass () pos
     | Pass r ->
-        Fail
+        let error =
           {
-            error =
-              {
-                pos;
-                kind = Expect { items = Items []; unexpected = Some r.pos };
-                extra = no_extra;
-              };
-            cut = false;
+            pos;
+            kind = Expect { items = Items []; unexpected = Some r.pos };
+            extra = no_extra;
           }
+        in
+        Fail { error; cut = false }
 
   let position _ pos = pass pos pos
 
@@ -721,10 +763,15 @@ module Make (I : INPUT) = struct
      be restored on the exceptional path. *)
 
   let enter p st pos =
-    if st.depth >= st.max_depth then raise_notrace (Too_deep pos);
-    st.depth <- st.depth + 1;
+    let depth = st.depth + 1 in
+    if depth > st.max_depth then raise_notrace (Too_deep pos);
+    if depth > st.deepest then begin
+      st.deepest <- depth;
+      st.deepest_pos <- pos
+    end;
+    st.depth <- depth;
     let r = p st pos in
-    st.depth <- st.depth - 1;
+    st.depth <- depth - 1;
     r
 
   let force l st pos = enter (Lazy.force l) st pos
@@ -758,7 +805,8 @@ module Make (I : INPUT) = struct
   let token t =
     let kind = expect_kind [ Expected.Literal (I.show t) ] in
     fun st pos ->
-      if pos < st.len && I.equal (I.get st.input pos) t then pass t (pos + 1)
+      if pos < st.len && I.equal (I.get st.input pos) t then
+        pass (I.get st.input pos) (pos + 1)
       else fail_kind pos kind
 
   (* [label name (peek >>= ...)] without the bind: nothing is committed or
@@ -910,7 +958,7 @@ module Make (I : INPUT) = struct
               extra = { no_extra with span = Some span };
             }
           in
-          Fail { error = with_hint hint e; cut }
+          fail_hinted hint e cut
 
   (* [seq (seq o p) c], except that a failure of [c] that is the reported
      one points back at the opener. *)
@@ -942,6 +990,7 @@ module Make (I : INPUT) = struct
     | Fail { cut = false; _ } as r when catch = `Committed -> r
     | Fail r as failed -> (
         let log = st.log and errors = st.errors in
+        let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
         (* Recorded first, so that whatever [sync] logs cannot hide it. *)
         record
           ~found:(Some (offset st r.error.pos))
@@ -957,7 +1006,7 @@ module Make (I : INPUT) = struct
                 hint = None;
               }
         | _ ->
-            restore st log errors;
+            rollback st log errors trivia_start trivia_stop;
             failed)
 
   (* The diagnostic for a token that is missing at [e.pos]: an empty span at
@@ -987,9 +1036,10 @@ module Make (I : INPUT) = struct
 
   let or_insert default p st pos =
     let log = st.log and errors = st.errors in
+    let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
     match p st pos with
     | Fail { error; cut = false } when error.pos = pos ->
-        restore st log errors;
+        rollback st log errors trivia_start trivia_stop;
         record
           ~found:(Some (offset st error.pos))
           st
@@ -1009,12 +1059,13 @@ module Make (I : INPUT) = struct
     | Fail _ as r -> r
     | Pass a -> (
         match p st a.pos with
-        | Fail b ->
-            Fail { error = with_hint a.hint b.error; cut = a.cut || b.cut }
+        | Fail b -> fail_hinted a.hint b.error (a.cut || b.cut)
         | Pass b -> (
             let cut = a.cut || b.cut in
             let hint = keep_join b.pos a.hint b.hint in
             let log = st.log and errors = st.errors in
+            let trivia_start = st.trivia_start
+            and trivia_stop = st.trivia_stop in
             match c st b.pos with
             | Pass d ->
                 Pass
@@ -1025,7 +1076,7 @@ module Make (I : INPUT) = struct
                     hint = keep_join d.pos hint d.hint;
                   }
             | Fail { error; cut = false } when or_insert && error.pos = b.pos ->
-                restore st log errors;
+                rollback st log errors trivia_start trivia_stop;
                 record
                   ~found:(Some (offset st error.pos))
                   st
@@ -1057,8 +1108,9 @@ module Make (I : INPUT) = struct
   let skip ~past ?nested stop st pos0 =
     let probe q pos =
       let log = st.log and errors = st.errors in
+      let trivia_start = st.trivia_start and trivia_stop = st.trivia_stop in
       let e = match q st pos with Pass r -> r.pos | Fail _ -> -1 in
-      restore st log errors;
+      rollback st log errors trivia_start trivia_stop;
       e
     in
     let rec go pos depth =

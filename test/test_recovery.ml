@@ -295,12 +295,19 @@ let quoted_escape =
 
 (* Recorded context *)
 
-(* [levels] nested contexts, each consuming an ['x']; the leaf is ['y']. The
-   recovering variant wraps level [at] in a [recover] that skips the rest. *)
-let nested ~levels ~at ~outer ~recovering =
+(* [levels] nested contexts, each consuming an ['x']; the leaf is ['y'], or a
+   variant with an abandoned alternative or optional prefix. The recovering
+   variant wraps level [at] in a [recover] that skips the rest. *)
+let nested ~levels ~at ~outer ~leaf ~recovering =
   let open P in
+  let leaf =
+    match leaf with
+    | 0 -> char 'y'
+    | 1 -> char 'y' <|> char 'w'
+    | _ -> optional (char 'q') *> char 'y'
+  in
   let rec level i =
-    if i > levels then char 'y' >>| ignore
+    if i > levels then leaf >>| ignore
     else
       let p =
         context (Printf.sprintf "level%d" i) (char 'x' *> level (i + 1))
@@ -313,22 +320,24 @@ let nested ~levels ~at ~outer ~recovering =
 
 let recorded_context =
   Prop.test ~name:"a recorded diagnostic has the context of the unrecovered one"
-    ~print:(fun (levels, at, xs, tail, outer) ->
-      Printf.sprintf "levels=%d recover at %d on %dx then %S%s" levels at xs
-        tail
-        (if outer then " in a context" else ""))
+    ~print:(fun (levels, at, xs, tail, outer, leaf) ->
+      Printf.sprintf "levels=%d recover at %d on %dx then %S%s, leaf %d" levels
+        at xs tail
+        (if outer then " in a context" else "")
+        leaf)
     Gen.(
       let* levels = int_range 1 4 in
       let* at = int_range 1 levels in
       let* xs = int_bound (levels + 1) in
-      let* tail = oneof_list [ ""; "z"; "xz" ] in
+      let* tail = oneof_list [ ""; "z"; "xz"; "q"; "w" ] in
       let* outer = bool in
-      return (levels, at, xs, tail, outer))
-    (fun (levels, at, xs, tail, outer) ->
+      let* leaf = int_bound 2 in
+      return (levels, at, xs, tail, outer, leaf))
+    (fun (levels, at, xs, tail, outer, leaf) ->
       let input = String.make xs 'x' ^ tail in
       match
-        ( P.parse (nested ~levels ~at ~outer ~recovering:false) input,
-          P.parse (nested ~levels ~at ~outer ~recovering:true) input )
+        ( P.parse (nested ~levels ~at ~outer ~leaf ~recovering:false) input,
+          P.parse (nested ~levels ~at ~outer ~leaf ~recovering:true) input )
       with
       | Ok (), Ok () -> true
       | Error [ plain ], Error (recovered :: _) ->
@@ -467,6 +476,76 @@ let inserting =
       && List.map start_of log = missing_at
       && Result.is_ok (P.parse (P.many item) input) = (missing_at = []))
 
+(* Insertion points: the trivia range is part of the path taken. The missing
+   ';' is always reported just after the 'a', before the whitespace. *)
+
+let gen_ws =
+  Gen.(string_size ~gen:(oneof_list [ ' '; '\n'; '\t' ]) (int_bound 3))
+
+let insertion_start p input =
+  match P.parse_partial P.(p <* skip_many any) input with
+  | Some (), [ d ] -> Some (start_of d)
+  | _ -> None
+
+(* Branches that consume trivia (before and after an 'x') and are then
+   forgotten. *)
+let abandoned_trivia = function
+  | 0 -> P.return ()
+  | 1 -> P.(lookahead (any_char *> whitespace))
+  | 2 -> P.(optional (any_char *> whitespace *> char '!') >>| ignore)
+  | _ -> P.(any_char *> whitespace *> char '!' >>| ignore <|> return ())
+
+let insertion_unchanged_by_forgotten_trivia =
+  Prop.test
+    ~name:
+      "the insertion point ignores trivia of lookaheads and abandoned branches"
+    ~print:(fun (ws1, ws2, kind) ->
+      Printf.sprintf "a%Sx%S, branch %d" ws1 ws2 kind)
+    Gen.(triple gen_ws gen_ws (int_bound 3))
+    (fun (ws1, ws2, kind) ->
+      let input = "a" ^ ws1 ^ "x" ^ ws2 in
+      let p =
+        P.(
+          char 'a' *> whitespace *> abandoned_trivia kind
+          *> or_insert () (char ';' >>| ignore))
+      in
+      insertion_start p input = Some 1)
+
+let insertion_unchanged_by_splitting_trivia =
+  Prop.test ~name:"adjacent trivia parsers give the insertion point of one"
+    ~print:(fun chunks -> Print.(list string) chunks)
+    Gen.(
+      list_size (int_range 1 4)
+        (string_size ~gen:(oneof_list [ ' '; '\n'; '\t' ]) (int_range 1 3)))
+    (fun chunks ->
+      let input = "a" ^ String.concat "" chunks ^ "x" in
+      let ws = List.map (fun c -> P.(trivia (string c))) chunks in
+      let p =
+        P.(
+          char 'a'
+          *> List.fold_right (fun w acc -> w *> acc) ws (return ())
+          *> or_insert () (char ';' >>| ignore))
+      in
+      insertion_start p input = Some 1)
+
+let hidden_does_not_move_insertion_point =
+  Prop.test ~name:"hidden p and p give the same insertion point"
+    ~print:(fun (ws, trivia) -> Printf.sprintf "a%S, trivia=%b" ws trivia)
+    Gen.(pair gen_ws bool)
+    (fun (ws, is_trivia) ->
+      let input = "a" ^ ws ^ "x" in
+      let skip = P.skip_while ~label:"space" P.is_space in
+      let skip = if is_trivia then P.trivia skip else skip in
+      let at p =
+        insertion_start
+          P.(char 'a' *> p *> or_insert () (char ';' >>| ignore))
+          input
+      in
+      (* Unmarked whitespace is part of the previous token as far as the
+         insertion point goes. *)
+      let expected = if is_trivia then 1 else 1 + String.length ws in
+      at skip = Some expected && at (P.hidden skip) = Some expected)
+
 (* Rules of the recording log *)
 
 let committed_catch_only =
@@ -567,6 +646,9 @@ let () =
       recovered_error_not_hidden;
       failed_recovery_records_nothing;
       recorded_context;
+      insertion_unchanged_by_forgotten_trivia;
+      insertion_unchanged_by_splitting_trivia;
+      hidden_does_not_move_insertion_point;
       skipping;
       limit;
       dedupe;

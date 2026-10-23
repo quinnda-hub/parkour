@@ -72,8 +72,15 @@ end
 
     {b Termination and depth.} Repetitions are loops, so long inputs do not grow
     the stack. Each entry into a recursive parser ({!fix}, {!delay}, {!force})
-    counts towards [max_depth]; exceeding it ends the parse with a
-    [nesting too deep] error rather than a stack overflow. *)
+    counts towards [max_depth] (default {!default_max_depth}); exceeding it ends
+    the parse with a [nesting too deep (more than N levels)] error rather than a
+    stack overflow. The stack a level uses depends on the grammar, so as a
+    backstop the running functions ({!parse}, {!parse_partial}, {!parse_prefix})
+    also turn a [Stack_overflow] raised during the run into the diagnostic
+    [nesting too deep (stack exhausted after N levels)], [N] being the deepest
+    nesting reached, at the position where that nesting was entered. This works
+    where OCaml raises [Stack_overflow] (5.x, bytecode, and native code on Linux
+    and macOS for 4.14). Other exceptions escape the run. *)
 module type S = sig
   type input
   type token
@@ -247,6 +254,10 @@ module type S = sig
   val sep_end_by : sep:_ t -> 'a t -> 'a list t
   (** Like {!sep_by} but allows (and consumes) one trailing separator. *)
 
+  val sep_end_by1 : sep:_ t -> 'a t -> 'a list t
+  (** Like {!sep_end_by} but requires at least one item: [p], then any number of
+      [sep p], then an optional trailing [sep]. *)
+
   val count : int -> 'a t -> 'a list t
   (** [count n p]: exactly [n] times; any failure of [p] fails [count]. Never
       raises [Grammar_error]. Raises [Invalid_argument] (when built) if [n < 0].
@@ -302,10 +313,22 @@ module type S = sig
   *)
 
   val hidden : 'a t -> 'a t
-  (** [hidden p] keeps [p] out of [expected ...] lists, e.g. for optional
-      whitespace: when [p] succeeds it adds nothing to later errors, and when it
-      fails without consuming input it expects nothing. Failures deeper inside
-      [p] (say, an unterminated comment) are reported unchanged. *)
+  (** [hidden p] keeps [p] out of [expected ...] lists, e.g. for an operator
+      whose name the message need not list: when [p] succeeds it adds nothing to
+      later errors, and when it fails without consuming input it expects
+      nothing. Failures deeper inside [p] (say, an unterminated comment) are
+      reported unchanged. It does not mark what [p] consumed as trivia; for
+      whitespace and comments use {!trivia}. *)
+
+  val trivia : 'a t -> 'a t
+  (** [trivia p] hides [p] like {!hidden}, and when [p] succeeds having consumed
+      input, remembers that input as trivia: whitespace or comments that
+      {!or_insert} and [between ~or_insert:true] skip back over, so that a
+      missing token is reported right after the previous token rather than after
+      the whitespace. Adjacent trivia (a range starting where the previous one
+      ended) counts as one, and trivia consumed by a branch that is abandoned is
+      forgotten. Whitespace and comment parsers, including user-written ones,
+      should be [trivia] (not {!hidden}). *)
 
   val context : string -> 'a t -> 'a t
   (** [context "assignment" p]: if [p] fails after its first token, the
@@ -489,6 +512,13 @@ module type S = sig
       where [span] covers the input from the start of [p] to where [sync]
       stopped. The commitment of the failure is kept.
 
+      The error recorded is the furthest one, the one {!parse} would report, and
+      [sync] starts there. Hazard: if an alternative or repetition read past the
+      item's terminator before being abandoned, that error (and so the start of
+      [sync]) lies beyond it, and recovery can skip the following item. Commit
+      with {!cut} after the token that identifies a construct, so that such
+      branches do not run on.
+
       If [sync] fails, or the whole recovery consumes nothing, [p]'s failure is
       returned unchanged (and not recorded) so that an outer [recover] can try;
       this guarantees progress. Exceptions are not caught. *)
@@ -513,7 +543,7 @@ module type S = sig
 
       The diagnostic points at the {e insertion point}, where the missing token
       belongs: an empty span right after the previous token, before any
-      whitespace or comments (those skipped by {!hidden} parsers or [Lexeme]).
+      whitespace or comments (those skipped by {!trivia} parsers or [Lexeme]).
       The token found instead is underlined as a secondary label with no text,
       unless it starts at the insertion point. Inside {!many}, make sure
       something else is consumed on each iteration. *)
@@ -529,7 +559,9 @@ module type S = sig
   (** Any single token. Fails only at end of input. *)
 
   val token : token -> token t
-  (** Exactly this token; expects it as a {!Expected.Literal}. *)
+  (** Exactly this token (as decided by the input's equality); expects it as a
+      {!Expected.Literal}. The result is the token found in the input, which may
+      differ from the argument when the equality is coarser than structural. *)
 
   val satisfy : string -> (token -> bool) -> token t
   (** [satisfy name pred]: a token satisfying [pred], expecting [name]. *)
@@ -547,18 +579,28 @@ end
 module type TEXT = sig
   include S with type input = string and type token = char
 
+  val tokens : ?skip:unit t -> 'tok t -> ('tok * Span.t) array t
+  (** [tokens ~skip tok] is the lexer as a parser:
+      [skip *> many (spanned tok <* skip)], as an array. It does not itself
+      require the end of the input; {!parse} and {!parse_partial} do. To lex
+      with error recovery, build [tok] with {!recover} (and {!or_insert},
+      {!emit}) and run [tokens] with {!parse_partial}, which returns the tokens
+      that were lexed together with every recorded diagnostic. *)
+
   val tokenize :
     ?skip:unit t ->
+    ?max_depth:int ->
+    ?max_errors:int ->
     'tok t ->
     string ->
     (('tok * Span.t) array, Diagnostic.t list) result
   (** [tokenize ~skip tok text] lexes [text] into an array of tokens with their
       source spans, ready for {!Parkour.Tokens}. It is
-      [skip *> many (spanned tok <* skip) <* eof]: [skip] (default: nothing)
-      runs before the first token and after each one, so it is where whitespace
-      and comments go; [skip] and [tok] are ordinary parsers, so a lexer is
-      written like any other grammar. Anything neither of them accepts is
-      reported as a diagnostic on [text]:
+      [parse (tokens ~skip tok) text], with the same [max_depth] and
+      [max_errors]. [skip] (default: nothing) runs before the first token and
+      after each one, so it is where whitespace and comments go; [skip] and
+      [tok] are ordinary parsers, so a lexer is written like any other grammar.
+      Anything neither of them accepts is reported as a diagnostic on [text]:
       {[
       let number = map (fun n -> `Num n) natural
       let plus = map (fun _ -> `Plus) (char '+')
@@ -638,7 +680,8 @@ module type TEXT = sig
   (** ["\n"] or ["\r\n"]; expects [newline]. *)
 
   val whitespace : unit t
-  (** Zero or more {!is_space} characters, {!hidden} from error messages. *)
+  (** Zero or more {!is_space} characters, {!trivia}: hidden from error messages
+      and remembered for {!or_insert}'s insertion points. *)
 
   (** {1 Text} *)
 
@@ -719,10 +762,11 @@ module type TEXT = sig
         it parses. *)
     module type S = sig
       val space : unit t
-      (** Whitespace and comments, {!hidden} from error messages. A line comment
-          stops before its newline. Fails with [unterminated comment], at the
-          end of input and underlining the opening delimiter, if a block comment
-          is not closed. *)
+      (** Whitespace and comments, {!trivia}: hidden from error messages and
+          remembered for {!or_insert}'s insertion points. A line comment stops
+          before its newline. Fails with [unterminated comment], at the end of
+          input and underlining the opening delimiter, if a block comment is not
+          closed. *)
 
       val lexeme : 'a t -> 'a t
       (** [lexeme p] is [p] followed by {!space}. *)
@@ -778,8 +822,9 @@ module type TEXT = sig
           [[A-Za-z_]] and [[A-Za-z0-9_]]).
         - [reserved]: words that {!S.identifier} rejects (default none).
 
-        Raises [Invalid_argument] if a delimiter is empty, or if comments nest
-        and a block comment opens and closes with the same text. *)
+        Raises [Invalid_argument] if a delimiter is empty, if a line comment
+        delimiter contains a newline ([\n] or [\r]), or if comments nest and a
+        block comment opens and closes with the same text. *)
   end
 
   (** {1 Unicode}

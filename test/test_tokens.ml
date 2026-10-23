@@ -326,6 +326,100 @@ let stack_safety =
           | Ok l -> List.length l = n
           | Error _ -> false))
 
+(* tokens, with recovery *)
+
+type num = Num of int | Bad
+
+let start_of d = (D.span d).start
+
+let diag severity start =
+  D.make ~severity ~span:(P.Span.make ~start ~stop:start) "emitted"
+
+(* Space-separated words: a number token (a warning is emitted for multiples of
+   7), or a run of letters, which is a recovered lexer error. *)
+let recovering_lexer =
+  let open P in
+  let number =
+    let* start = position in
+    let* n = natural in
+    (if n mod 7 = 0 then emit (diag `Warning start) else return ())
+    *> return (Num n)
+  in
+  let junk =
+    recover ~catch:`Any
+      ~sync:(skip_while (fun c -> c <> ' '))
+      ~fallback:(fun _ -> Bad)
+      (fail "bad token")
+  in
+  tokens ~skip:(skip_while (fun c -> c = ' ')) (number <|> junk)
+
+let tokens_recovering =
+  Prop.test
+    ~name:"tokens with parse_partial returns the warnings and recovered errors"
+    ~print:Print.(list string)
+    Gen.(
+      list_size (int_bound 8)
+        (oneof
+           [
+             map string_of_int (int_bound 30);
+             string_size ~gen:(char_range 'a' 'z') (int_range 1 3);
+           ]))
+    (fun items ->
+      let is_number s = s.[0] <= '9' in
+      let input = String.concat " " items in
+      let placed =
+        let at = ref 0 in
+        List.map
+          (fun item ->
+            let start = !at in
+            at := start + String.length item + 1;
+            (item, start))
+          items
+      in
+      let expected =
+        List.map
+          (fun (item, start) ->
+            ( (if is_number item then Num (int_of_string item) else Bad),
+              P.Span.make ~start ~stop:(start + String.length item) ))
+          placed
+      in
+      let at keep =
+        List.filter_map
+          (fun (item, start) -> if keep item then Some start else None)
+          placed
+      in
+      let value, log = P.parse_partial recovering_lexer input in
+      let starts f = List.map start_of (List.filter f log) in
+      value = Some (Array.of_list expected)
+      && starts (fun d -> not (D.is_error d))
+         = at (fun s -> is_number s && int_of_string s mod 7 = 0)
+      && starts D.is_error = at (fun s -> not (is_number s)))
+
+(* [token] returns the input's token, not its argument. *)
+
+module Ci_token = struct
+  type t = string
+
+  let equal a b = String.lowercase_ascii a = String.lowercase_ascii b
+  let show = Fun.id
+end
+
+module Ci = P.Tokens (Ci_token)
+
+let token_returns_input =
+  Prop.test ~name:"token returns the token found in the input"
+    ~print:Print.(pair string string)
+    Gen.(
+      let word = string_size ~gen:(char_range 'a' 'c') (int_range 1 3) in
+      let* w = word in
+      let* upper = bool in
+      return (w, if upper then String.uppercase_ascii w else w))
+    (fun (arg, found) ->
+      let input =
+        Ci.input ~source:found [| (found, P.Span.make ~start:0 ~stop:1) |]
+      in
+      Ci.parse (Ci.token arg) input = Ok found)
+
 (* Insertion points *)
 
 module Trivia = (val P.Lexeme.make ~line_comments:[ "#" ] ())
@@ -424,6 +518,8 @@ let () =
       tokenize_prop;
       language_agreement;
       lexer_error_comes_first;
+      tokens_recovering;
+      token_returns_input;
       stack_safety;
       insertion_point;
       between_or_insert;
