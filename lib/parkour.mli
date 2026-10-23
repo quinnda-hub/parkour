@@ -50,6 +50,66 @@ module type TEXT = Parkour_intf.TEXT
 (** A parser over any input. *)
 module Make (I : INPUT) : S with type input = I.t and type token = I.token
 
+module type TOKEN = Parkour_intf.TOKEN
+
+(** A parser over an array of tokens, as produced by {!tokenize}. Split parsing
+    in two: a lexer turns text into tokens (with their spans), then a grammar
+    over the tokens never sees whitespace or comments. Diagnostics still refer
+    to the original text, so they render against the {!Source} the user wrote:
+    underlines cover the source text of tokens, and [expected] lists use
+    {!TOKEN.show}.
+
+    {[
+    type tok = Num of int | Plus
+
+    module Tok = struct
+      type t = tok
+
+      let equal = ( = )
+      let show = function Num n -> string_of_int n | Plus -> "+"
+    end
+
+    module T = Tokens (Tok)
+
+    let lexer =
+      let open Parkour in
+      tokenize ~skip:(skip_while is_space)
+        (choice
+           [ map (fun n -> Num n) natural; map (fun _ -> Plus) (char '+') ])
+
+    let sum =
+      let open T in
+      let num = expect "number" (function Num n -> Some n | _ -> None) in
+      chainl1 num (token Plus *> return ( + ))
+
+    let eval text =
+      let source = Parkour.Source.make ~name:"calc" text in
+      let report ds =
+        List.iter
+          (fun d -> print_string (Parkour.Diagnostic.render source d))
+          ds
+      in
+      match lexer text with
+      | Error ds -> report ds
+      | Ok tokens -> (
+          match T.parse sum (T.input ~source:text tokens) with
+          | Ok n -> Printf.printf "%d\n" n
+          | Error ds -> report ds)
+    ]}
+
+    A token's span is its source text; the end of the token array is the end of
+    the source. A "found" description quotes the source text of the token, and
+    {!S.not_followed_by} and friends describe a run of tokens by the source text
+    from the first one's start to the last one's end. A token whose span is
+    empty is quoted by its {!TOKEN.show} instead. *)
+module Tokens (T : TOKEN) : sig
+  include S with type token = T.t
+
+  val input : source:string -> (T.t * Span.t) array -> input
+  (** [input ~source tokens]: the tokens lexed from [source], with their spans
+      in [source], in increasing order. *)
+end
+
 include TEXT
 
 (**/**)

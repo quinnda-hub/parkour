@@ -37,6 +37,17 @@ module type INPUT = sig
       matched. *)
 end
 
+(** What {!Parkour.Tokens} needs to know about a token type. *)
+module type TOKEN = sig
+  type t
+
+  val equal : t -> t -> bool
+
+  val show : t -> string
+  (** How the token is written in the source, e.g. [";"] or [let]. Used for
+      {!Expected.Literal}, so [expected ';'] names the token. *)
+end
+
 (** The combinator interface, identical for every input type.
 
     {2 Semantics}
@@ -484,6 +495,26 @@ end
 (** The default instance over strings, with byte-level text primitives. *)
 module type TEXT = sig
   include S with type input = string and type token = char
+
+  val tokenize :
+    ?skip:unit t ->
+    'tok t ->
+    string ->
+    (('tok * Span.t) array, Diagnostic.t list) result
+  (** [tokenize ~skip tok text] lexes [text] into an array of tokens with their
+      source spans, ready for {!Parkour.Tokens}. It is
+      [skip *> many (spanned tok <* skip) <* eof]: [skip] (default: nothing)
+      runs before the first token and after each one, so it is where whitespace
+      and comments go; [skip] and [tok] are ordinary parsers, so a lexer is
+      written like any other grammar. Anything neither of them accepts is
+      reported as a diagnostic on [text]:
+      {[
+      let number = map (fun n -> `Num n) natural
+      let plus = map (fun _ -> `Plus) (char '+')
+      let lexer = tokenize ~skip:(skip_while is_space) (number <|> plus)
+      (* lexer "12 + 3" = Ok [| (`Num 12, 0-2); (`Plus, 3-4); (`Num 3, 5-6) |]
+         lexer "12 ? 3" = Error [d], where d's span starts at the '?' *)
+      ]} *)
 
   val char : char -> char t
   (** Same as [token]. *)

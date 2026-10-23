@@ -44,6 +44,14 @@ val gen_input : string QCheck2.Gen.t
 
 val compile : t -> string Parkour.t
 
+(** The same compilation over any parser on [char] tokens, for comparing inputs.
+    Text-only primitives ([Str], [Take_while], [Take_while1]) are rewritten into
+    token-level combinations, so every instance compiles the same grammar (not
+    the same as {!compile}). *)
+module Compile (P : Parkour.S with type token = char) : sig
+  val compile : t -> string P.t
+end
+
 val children : t -> t list
 (** Immediate sub-grammars. *)
 

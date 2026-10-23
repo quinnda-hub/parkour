@@ -155,6 +155,51 @@ let rec compile g : string Parkour.t =
   | Take_while (label, m) -> take_while ?label (mem m)
   | Take_while1 (l, m) -> take_while1 l (mem m)
 
+(* The same compilation over any char-token parser. Text-only nodes are
+   rewritten into token-level equivalents (not equivalent to the text
+   primitives, but identical for every instance). *)
+module Compile (P : Parkour.S with type token = char) = struct
+  let rec compile g : string P.t =
+    let open P in
+    match g with
+    | Char c -> map (String.make 1) (token c)
+    | Str s ->
+        let chars = List.init (String.length s) (fun i -> Char s.[i]) in
+        compile
+          (List.fold_right
+             (fun c acc -> Seq (By_both, c, acc))
+             chars
+             (Count (0, Any)))
+    | Satisfy (l, m) -> map (String.make 1) (satisfy l (mem m))
+    | Any -> map (String.make 1) any
+    | Eof -> map (fun () -> "") eof
+    | Seq (By_bind, a, b) ->
+        compile a >>= fun x ->
+        compile b >>| fun y -> x ^ y
+    | Seq (By_both, a, b) ->
+        map (fun (x, y) -> x ^ y) (both (compile a) (compile b))
+    | Seq (By_ap, a, b) -> map ( ^ ) (compile a) <*> compile b
+    | Choice l -> choice (List.map compile l)
+    | Alt (a, b) -> compile a <|> compile b
+    | Many g -> map concat (many (compile g))
+    | Many1 g -> map concat (many1 (compile g))
+    | Opt g -> option "" (compile g)
+    | Sep_by (sep, g) -> map concat (sep_by ~sep:(compile sep) (compile g))
+    | Sep_end_by (sep, g) ->
+        map concat (sep_end_by ~sep:(compile sep) (compile g))
+    | Many_till (g, stop) -> map concat (many_till (compile g) (compile stop))
+    | Count (n, g) -> map concat (count n (compile g))
+    | Label (l, g) -> label l (compile g)
+    | Hidden g -> hidden (compile g)
+    | Fail m -> fail m
+    | Cut -> map (fun () -> "") cut
+    | Attempt g -> attempt (compile g)
+    | Lookahead g -> lookahead (compile g)
+    | Not_followed_by g -> map (fun () -> "") (not_followed_by (compile g))
+    | Take_while (_, m) -> compile (Many (Satisfy ("c", m)))
+    | Take_while1 (l, m) -> compile (Many1 (Satisfy (l, m)))
+end
+
 let children = function
   | Char _ | Str _ | Satisfy _ | Any | Eof | Fail _ | Cut | Take_while _
   | Take_while1 _ ->

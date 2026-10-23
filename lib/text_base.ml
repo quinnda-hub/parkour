@@ -24,6 +24,11 @@ end
 
 include Engine.Make (String_input)
 
+let tokenize ?(skip = return ()) tok text =
+  match parse (skip *> many (spanned tok <* skip) <* eof) text with
+  | Ok l -> Ok (Array.of_list l)
+  | Error _ as e -> e
+
 let char = token
 let any_char = any
 
