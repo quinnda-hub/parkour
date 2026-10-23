@@ -71,7 +71,7 @@ and un n g = Printf.sprintf "%s(%s)" n (to_string g)
 (* Generation *)
 
 let gen_input =
-  QCheck2.Gen.(string_size ~gen:(oneof_list [ 'a'; 'b'; 'c' ]) (int_bound 8))
+  QCheck2.Gen.(string_size ~gen:(oneof_list [ 'a'; 'b'; 'c' ]) (Prop.bound 8))
 
 let gen ~cuts =
   let open QCheck2.Gen in
@@ -95,33 +95,100 @@ let gen ~cuts =
   let node self n =
     let sub = self (n / 2) and next = self (n - 1) in
     oneof_weighted
-      [
-        (3, leaf);
-        (5, map3 (fun st a b -> Seq (st, a, b)) style sub sub);
-        (1, map (fun l -> Choice l) (list_size (int_bound 4) sub));
-        (5, map2 (fun a b -> Alt (a, b)) sub sub);
-        (2, map (fun g -> Many g) next);
-        (1, map (fun g -> Many1 g) next);
-        (1, map (fun g -> Opt g) next);
-        (1, map2 (fun a b -> Sep_by (a, b)) sub sub);
-        (1, map2 (fun a b -> Sep_end_by (a, b)) sub sub);
-        (1, map2 (fun a b -> Many_till (a, b)) sub sub);
-        (1, map2 (fun n g -> Count (n, g)) (int_range 0 3) next);
-        (1, map2 (fun l g -> Label (l, g)) label next);
-        (1, map (fun g -> Hidden g) next);
-        (1, map (fun g -> Attempt g) next);
-        (1, map (fun g -> Lookahead g) next);
-        (1, map (fun g -> Not_followed_by g) next);
-      ]
+      ([
+         (3, leaf);
+         (5, map3 (fun st a b -> Seq (st, a, b)) style sub sub);
+         (1, map (fun l -> Choice l) (list_size (int_bound 4) sub));
+         (5, map2 (fun a b -> Alt (a, b)) sub sub);
+         (2, map (fun g -> Many g) next);
+         (1, map (fun g -> Many1 g) next);
+         (1, map (fun g -> Opt g) next);
+         (1, map2 (fun a b -> Sep_by (a, b)) sub sub);
+         (1, map2 (fun a b -> Sep_end_by (a, b)) sub sub);
+         (1, map2 (fun a b -> Many_till (a, b)) sub sub);
+         (1, map2 (fun n g -> Count (n, g)) (int_range 0 3) next);
+         (1, map2 (fun l g -> Label (l, g)) label next);
+         (1, map (fun g -> Hidden g) next);
+         (1, map (fun g -> Attempt g) next);
+         (1, map (fun g -> Lookahead g) next);
+         (1, map (fun g -> Not_followed_by g) next);
+       ]
+      @
+      (* a commitment followed by more: the common shape of a cut *)
+      if cuts then
+        [
+          (4, map2 (fun st g -> Seq (st, Cut, g)) style sub);
+          (* ... and one that [attempt] takes back *)
+          (2, map2 (fun st g -> Attempt (Seq (st, Cut, g))) style sub);
+        ]
+      else [])
   in
-  sized_size (int_bound 8)
+  sized_size (Prop.bound 8)
     (fix (fun self n -> if n <= 0 then leaf else node self n))
+
+(* Inputs for a grammar: a best-effort derivation (what each construct would
+   accept, concatenated), so that many cases parse. It is not always accepted:
+   a repetition may take more than its share, a [Cut] commits before an
+   alternative that was meant to be tried. *)
+let derive g =
+  let open QCheck2.Gen in
+  let letters mask = List.filter (mem mask) [ 'a'; 'b'; 'c' ] in
+  let one_of_mask mask =
+    match letters mask with
+    | [] -> return ""
+    | l -> map (String.make 1) (oneof_list l)
+  in
+  let rec go g =
+    match g with
+    | Char c -> return (String.make 1 c)
+    | Str s -> return s
+    | Satisfy (_, m) -> one_of_mask m
+    | Any -> map (String.make 1) (oneof_list [ 'a'; 'b'; 'c' ])
+    | Eof | Cut | Fail _ | Lookahead _ | Not_followed_by _ -> return ""
+    | Seq (_, a, b) -> map2 ( ^ ) (go a) (go b)
+    | Choice [] -> return ""
+    | Choice l -> oneof (List.map go l)
+    | Alt (a, b) -> oneof [ go a; go b ]
+    | Many g | Many1 g ->
+        map (String.concat "") (list_size (int_bound 3) (go g))
+    | Opt g -> oneof [ go g; return "" ]
+    | Sep_by (sep, g) | Sep_end_by (sep, g) ->
+        map2
+          (fun first rest -> String.concat "" (first :: rest))
+          (go g)
+          (list_size (int_bound 2) (map2 ( ^ ) (go sep) (go g)))
+    | Many_till (g, stop) ->
+        map2 ( ^ )
+          (map (String.concat "") (list_size (int_bound 3) (go g)))
+          (go stop)
+    | Count (n, g) -> map (String.concat "") (list_size (return n) (go g))
+    | Label (_, g) | Hidden g | Attempt g -> go g
+    | Take_while (_, m) ->
+        map (String.concat "") (list_size (int_bound 3) (one_of_mask m))
+    | Take_while1 (_, m) ->
+        map (String.concat "") (list_size (int_range 1 3) (one_of_mask m))
+  in
+  go g
+
+let gen_matching ~cuts =
+  QCheck2.Gen.(
+    let* g = gen ~cuts in
+    let* s = derive g in
+    return (g, s))
 
 (* Compilation *)
 
 let concat = String.concat ""
 
-let rec compile g : string Parkour.t =
+let ticking p =
+  Parkour.map
+    (fun x ->
+      Prop.tick ();
+      x)
+    p
+
+let rec compile ?(on_cut = ignore) g : string Parkour.t =
+  let compile = compile ~on_cut in
   let open Parkour in
   match g with
   | Char c -> map (String.make 1) (char c)
@@ -137,18 +204,25 @@ let rec compile g : string Parkour.t =
   | Seq (By_ap, a, b) -> map ( ^ ) (compile a) <*> compile b
   | Choice l -> choice (List.map compile l)
   | Alt (a, b) -> compile a <|> compile b
-  | Many g -> map concat (many (compile g))
-  | Many1 g -> map concat (many1 (compile g))
+  | Many g -> map concat (many (ticking (compile g)))
+  | Many1 g -> map concat (many1 (ticking (compile g)))
   | Opt g -> option "" (compile g)
-  | Sep_by (sep, g) -> map concat (sep_by ~sep:(compile sep) (compile g))
+  | Sep_by (sep, g) ->
+      map concat (sep_by ~sep:(compile sep) (ticking (compile g)))
   | Sep_end_by (sep, g) ->
-      map concat (sep_end_by ~sep:(compile sep) (compile g))
-  | Many_till (g, stop) -> map concat (many_till (compile g) (compile stop))
+      map concat (sep_end_by ~sep:(compile sep) (ticking (compile g)))
+  | Many_till (g, stop) ->
+      map concat (many_till (ticking (compile g)) (compile stop))
   | Count (n, g) -> map concat (count n (compile g))
   | Label (l, g) -> label l (compile g)
   | Hidden g -> hidden (compile g)
   | Fail m -> fail m
-  | Cut -> map (fun () -> "") cut
+  | Cut ->
+      map
+        (fun () ->
+          on_cut ();
+          "")
+        cut
   | Attempt g -> attempt (compile g)
   | Lookahead g -> lookahead (compile g)
   | Not_followed_by g -> map (fun () -> "") (not_followed_by (compile g))
@@ -159,6 +233,13 @@ let rec compile g : string Parkour.t =
    rewritten into token-level equivalents (not equivalent to the text
    primitives, but identical for every instance). *)
 module Compile (P : Parkour.S with type token = char) = struct
+  let ticking p =
+    P.map
+      (fun x ->
+        Prop.tick ();
+        x)
+      p
+
   let rec compile g : string P.t =
     let open P in
     match g with
@@ -181,13 +262,15 @@ module Compile (P : Parkour.S with type token = char) = struct
     | Seq (By_ap, a, b) -> map ( ^ ) (compile a) <*> compile b
     | Choice l -> choice (List.map compile l)
     | Alt (a, b) -> compile a <|> compile b
-    | Many g -> map concat (many (compile g))
-    | Many1 g -> map concat (many1 (compile g))
+    | Many g -> map concat (many (ticking (compile g)))
+    | Many1 g -> map concat (many1 (ticking (compile g)))
     | Opt g -> option "" (compile g)
-    | Sep_by (sep, g) -> map concat (sep_by ~sep:(compile sep) (compile g))
+    | Sep_by (sep, g) ->
+        map concat (sep_by ~sep:(compile sep) (ticking (compile g)))
     | Sep_end_by (sep, g) ->
-        map concat (sep_end_by ~sep:(compile sep) (compile g))
-    | Many_till (g, stop) -> map concat (many_till (compile g) (compile stop))
+        map concat (sep_end_by ~sep:(compile sep) (ticking (compile g)))
+    | Many_till (g, stop) ->
+        map concat (many_till (ticking (compile g)) (compile stop))
     | Count (n, g) -> map concat (count n (compile g))
     | Label (l, g) -> label l (compile g)
     | Hidden g -> hidden (compile g)
@@ -200,45 +283,34 @@ module Compile (P : Parkour.S with type token = char) = struct
     | Take_while1 (l, m) -> compile (Many1 (Satisfy (l, m)))
 end
 
-let children = function
-  | Char _ | Str _ | Satisfy _ | Any | Eof | Fail _ | Cut | Take_while _
-  | Take_while1 _ ->
-      []
-  | Alt (a, b) | Sep_by (a, b) | Sep_end_by (a, b) | Many_till (a, b) ->
-      [ a; b ]
-  | Seq (_, a, b) -> [ a; b ]
-  | Choice l -> l
-  | Many g
-  | Many1 g
-  | Opt g
-  | Count (_, g)
-  | Label (_, g)
-  | Hidden g
-  | Attempt g
-  | Lookahead g
-  | Not_followed_by g ->
-      [ g ]
+(* [Cut]s replaced by [Count (0, Any)]: all of them, or only those under an
+   [Attempt], [Lookahead] or [Not_followed_by]. *)
+let erase ~everywhere g =
+  let rec go ~under = function
+    | Cut -> if everywhere || under then Count (0, Any) else Cut
+    | ( Char _ | Str _ | Satisfy _ | Any | Eof | Fail _ | Take_while _
+      | Take_while1 _ ) as g ->
+        g
+    | Seq (st, a, b) -> Seq (st, go ~under a, go ~under b)
+    | Choice l -> Choice (List.map (go ~under) l)
+    | Alt (a, b) -> Alt (go ~under a, go ~under b)
+    | Sep_by (a, b) -> Sep_by (go ~under a, go ~under b)
+    | Sep_end_by (a, b) -> Sep_end_by (go ~under a, go ~under b)
+    | Many_till (a, b) -> Many_till (go ~under a, go ~under b)
+    | Many g -> Many (go ~under g)
+    | Many1 g -> Many1 (go ~under g)
+    | Opt g -> Opt (go ~under g)
+    | Count (n, g) -> Count (n, go ~under g)
+    | Label (l, g) -> Label (l, go ~under g)
+    | Hidden g -> Hidden (go ~under g)
+    | Attempt g -> Attempt (go ~under:true g)
+    | Lookahead g -> Lookahead (go ~under:true g)
+    | Not_followed_by g -> Not_followed_by (go ~under:true g)
+  in
+  go ~under:false g
 
-let rec erase_cuts = function
-  | Cut -> Count (0, Any)
-  | ( Char _ | Str _ | Satisfy _ | Any | Eof | Fail _ | Take_while _
-    | Take_while1 _ ) as g ->
-      g
-  | Seq (st, a, b) -> Seq (st, erase_cuts a, erase_cuts b)
-  | Choice l -> Choice (List.map erase_cuts l)
-  | Alt (a, b) -> Alt (erase_cuts a, erase_cuts b)
-  | Sep_by (a, b) -> Sep_by (erase_cuts a, erase_cuts b)
-  | Sep_end_by (a, b) -> Sep_end_by (erase_cuts a, erase_cuts b)
-  | Many_till (a, b) -> Many_till (erase_cuts a, erase_cuts b)
-  | Many g -> Many (erase_cuts g)
-  | Many1 g -> Many1 (erase_cuts g)
-  | Opt g -> Opt (erase_cuts g)
-  | Count (n, g) -> Count (n, erase_cuts g)
-  | Label (l, g) -> Label (l, erase_cuts g)
-  | Hidden g -> Hidden (erase_cuts g)
-  | Attempt g -> Attempt (erase_cuts g)
-  | Lookahead g -> Lookahead (erase_cuts g)
-  | Not_followed_by g -> Not_followed_by (erase_cuts g)
+let erase_cuts = erase ~everywhere:true
+let erase_absorbed_cuts = erase ~everywhere:false
 
 (* The oracle: a naive recursive interpreter. Every primitive failure is
    appended to a global log; the log is trimmed where the contract says

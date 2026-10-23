@@ -32,7 +32,7 @@ let gen_text =
   let frag = Gen.oneof_array in
   Gen.(
     map (String.concat "")
-      (list_size (int_bound 30) (oneof [ frag fragments; frag newline_heavy ])))
+      (list_size (Prop.bound 30) (oneof [ frag fragments; frag newline_heavy ])))
 
 let print_text = Printf.sprintf "%S"
 
@@ -270,9 +270,112 @@ let caret_alignment =
              = String.length caret - max 1 l
       | _ -> false)
 
+(* The renderer's tables, written out again here: control and bidirectional
+   characters are replaced, zero-width and wide characters change the columns.
+   Every interval is probed at its ends and one scalar beyond each. *)
+let odd_ranges = [ (0x80, 0x9F); (0x202A, 0x202E); (0x2066, 0x2069) ]
+
+let zero_ranges =
+  [
+    (0x0300, 0x036F);
+    (0x1AB0, 0x1AFF);
+    (0x1DC0, 0x1DFF);
+    (0x20D0, 0x20FF);
+    (0xFE20, 0xFE2F);
+    (0x200B, 0x200F);
+    (0xFE00, 0xFE0F);
+    (0xE0100, 0xE01EF);
+  ]
+
+let wide_ranges =
+  [
+    (0x1100, 0x115F);
+    (0x2E80, 0x303E);
+    (0x3041, 0x33FF);
+    (0x3400, 0x4DBF);
+    (0x4E00, 0x9FFF);
+    (0xA000, 0xA4CF);
+    (0xAC00, 0xD7A3);
+    (0xF900, 0xFAFF);
+    (0xFE30, 0xFE4F);
+    (0xFF00, 0xFF60);
+    (0xFFE0, 0xFFE6);
+    (0x1F300, 0x1F64F);
+    (0x1F900, 0x1F9FF);
+    (0x20000, 0x2FFFD);
+    (0x30000, 0x3FFFD);
+  ]
+
+let within ranges c = List.exists (fun (lo, hi) -> lo <= c && c <= hi) ranges
+
+let probes =
+  let around (lo, hi) = [ lo - 1; lo; hi; hi + 1 ] in
+  let all =
+    List.concat_map around (odd_ranges @ zero_ranges @ wide_ranges)
+    @ [ 0x1F; 0x20; 0x7E; 0x7F; 0x80; 0xFF; 0x2FF; 0x300 ]
+  in
+  List.sort_uniq compare
+    (List.filter (fun c -> Uchar.is_valid c && c <> 0x0A && c <> 0x0D) all)
+
+let utf8 c =
+  let b = Buffer.create 4 in
+  Buffer.add_utf_8_uchar b (Uchar.of_int c);
+  Buffer.contents b
+
+let displayed c =
+  if within odd_ranges c then "\xef\xbf\xbd"
+  else if c < 0x20 then utf8 (0x2400 + c)
+  else if c = 0x7F then utf8 0x2421
+  else utf8 c
+
+let display_width c =
+  if c < 0x20 || c = 0x7F || within odd_ranges c || c < 0x300 then 1
+  else if within zero_ranges c then 0
+  else if within wide_ranges c then 2
+  else 1
+
+let unicode_cells =
+  Prop.test
+    ~name:
+      "render: a character is shown sanitised and takes its display width, at \
+       the ends of every control and width interval"
+    ~print:(fun before ->
+      String.concat " " (List.map (Printf.sprintf "U+%04X") before))
+    Gen.(list_size (int_bound 3) (oneof_list probes))
+    (fun before ->
+      let prefix = String.concat "" (List.map utf8 before) in
+      let col = List.fold_left (fun a x -> a + display_width x) 0 before in
+      let check c =
+        let text = prefix ^ utf8 c ^ "b" in
+        let shown =
+          String.concat "" (List.map displayed (before @ [ c ])) ^ "b"
+        in
+        let mark a b =
+          let d = Diagnostic.make ~span:(Span.make ~start:a ~stop:b) "m" in
+          match
+            String.split_on_char '\n'
+              (Diagnostic.render ~max_width:1000 (Source.make text) d)
+          with
+          | _ :: _ :: _ :: content :: marker :: _ -> Some (content, marker)
+          | _ -> None
+        in
+        let n = String.length prefix in
+        let stop = n + String.length (utf8 c) in
+        (* the character itself, then the 'b' after it *)
+        mark n stop
+        = Some
+            ( "1 | " ^ shown,
+              "  | " ^ String.make col ' '
+              ^ String.make (max 1 (display_width c)) '^' )
+        && mark stop (stop + 1)
+           = Some
+               ( "1 | " ^ shown,
+                 "  | " ^ String.make (col + display_width c) ' ' ^ "^" )
+      in
+      List.for_all check probes)
+
 let huge_line =
-  Prop.test ~count:1 ~name:"render: one error in a 10 MB single line is cheap"
-    (Gen.return ()) (fun () ->
+  Prop.once ~name:"render: one error in a 10 MB single line is cheap" (fun () ->
       let n = 10_000_000 in
       let s = String.make n 'a' in
       let out =
@@ -284,17 +387,18 @@ let huge_line =
 (* Secondary labels and notes *)
 
 (* ASCII text with newlines; a primary and 1-3 secondary spans, each with a
-   unique text, and 0-2 notes. *)
+   unique text, and 0-2 notes. Short lines and long spans, so that spans often
+   cross several lines (more than four lines, too) and overlap. *)
 let gen_labelled =
   let open Gen in
   let line =
-    string_size ~gen:(oneof [ char_range 'a' 'z'; return ' ' ]) (int_bound 25)
+    string_size ~gen:(oneof [ char_range 'a' 'z'; return ' ' ]) (Prop.bound 10)
   in
-  let* text = map (String.concat "\n") (list_size (int_range 1 8) line) in
+  let* text = map (String.concat "\n") (list_size (Prop.range 1 10) line) in
   let n = String.length text in
   let span =
     let* a = int_bound n in
-    let* l = int_bound (min 40 (n - a)) in
+    let* l = oneof [ int_bound (min 8 (n - a)); int_bound (min 70 (n - a)) ] in
     return (Span.make ~start:a ~stop:(a + l))
   in
   let* primary = span in
@@ -384,27 +488,31 @@ let first_nonblank l =
   let rec go i = if i < String.length l && l.[i] = ' ' then go (i + 1) else i in
   go 0
 
+(* The lines drawn for a set of annotations, and those of them that are the
+   filler of a one-line gap. *)
+let layout text spans =
+  let shown =
+    List.sort_uniq compare
+      (List.concat_map
+         (fun sp ->
+           let _, _, f, l = model text sp in
+           shown_lines f l)
+         spans)
+  in
+  let rec gaps = function
+    | a :: (b :: _ as rest) when b = a + 2 -> (a + 1) :: gaps rest
+    | _ :: rest -> gaps rest
+    | [] -> []
+  in
+  (List.sort compare (shown @ gaps shown), gaps shown)
+
 let labelled_lines =
   Prop.test
     ~name:
       "render with labels: shown lines are the union, a one-line gap filled, \
        ... at longer gaps" ~print:print_labelled gen_labelled
     (fun ((text, primary, secondary, _) as c) ->
-      let lines =
-        List.sort_uniq compare
-          (List.concat_map
-             (fun sp ->
-               let _, _, f, l = model text sp in
-               shown_lines f l)
-             (primary :: secondary))
-      in
-      (* a single missing line is shown instead of "..." *)
-      let rec fill = function
-        | a :: (b :: _ as rest) when b = a + 2 -> a :: (a + 1) :: fill rest
-        | a :: rest -> a :: fill rest
-        | [] -> []
-      in
-      let lines = fill lines in
+      let lines, _ = layout text (primary :: secondary) in
       let expected =
         List.concat
           (List.mapi
@@ -439,11 +547,24 @@ let marker_col l =
   let k = first_nonblank l in
   if k < String.length l && l.[k] = '|' then go (k + 1) else None
 
+(* Start and end (before the line break) of line [n], numbered from 1. *)
+let line_bounds text n =
+  let rec go line start =
+    let stop =
+      match String.index_from_opt text start '\n' with
+      | Some e -> e
+      | None -> String.length text
+    in
+    if line = n then (start, stop) else go (line + 1) (stop + 1)
+  in
+  go 1 0
+
 let labelled_markers =
   Prop.test
     ~name:
-      "render with labels: one-line annotations are drawn at their column; \
-       rows are ordered" ~print:print_labelled gen_labelled
+      "render with labels: every annotation is marked on each of its drawn \
+       lines, multiline ones too; rows are ordered"
+    ~print:print_labelled gen_labelled
     (fun ((text, primary, secondary, _) as c) ->
       let out = render_labelled c in
       let all =
@@ -452,38 +573,31 @@ let labelled_markers =
              (fun i sp -> (sp, Printf.sprintf "S%d" (i + 1), '-'))
              secondary
       in
-      let max_line =
-        List.fold_left
-          (fun m (sp, _, _) ->
-            let _, _, f, l = model text sp in
-            List.fold_left max m (shown_lines f l))
-          0 all
+      let lines, filled = layout text (List.map (fun (sp, _, _) -> sp) all) in
+      let g = String.length (string_of_int (List.fold_left max 0 lines)) in
+      (* The marker rows each annotation should have: on its shown lines and on
+         the filled gap lines it spans. *)
+      let expected =
+        List.concat_map
+          (fun (sp, tag, ch) ->
+            let start, stop, first, last = model text sp in
+            let drawn =
+              shown_lines first last
+              @ List.filter (fun l -> first <= l && l <= last) filled
+            in
+            List.map
+              (fun l ->
+                let ls, le = line_bounds text l in
+                let from = if l = first then start - ls else 0 in
+                let upto = if l = last then min stop le - ls else le - ls in
+                String.make g ' ' ^ " | " ^ String.make from ' '
+                ^ String.make (max 1 (upto - from)) ch
+                ^ if l = last then " " ^ tag else "")
+              drawn)
+          all
       in
-      let g = String.length (string_of_int max_line) in
       let rows = rows_of out in
-      let exact (sp, tag, ch) =
-        let start, stop, first, last = model text sp in
-        if first <> last then true
-        else
-          let ls =
-            if start = 0 then 0
-            else
-              match String.rindex_from_opt text (start - 1) '\n' with
-              | Some k -> k + 1
-              | None -> 0
-          in
-          let le =
-            try String.index_from text start '\n'
-            with Not_found -> String.length text
-          in
-          let n = max 1 (min stop le - start) in
-          let row =
-            String.make g ' ' ^ " | "
-            ^ String.make (start - ls) ' '
-            ^ String.make n ch ^ " " ^ tag
-          in
-          List.mem row rows
-      in
+      let observed = List.filter (fun l -> marker_col l <> None) rows in
       let ordered =
         let rec go = function
           | a :: (b :: _ as rest) -> (
@@ -503,7 +617,7 @@ let labelled_markers =
         in
         List.for_all go (groups [] [] rows)
       in
-      List.for_all exact all && ordered)
+      List.sort compare observed = List.sort compare expected && ordered)
 
 let () =
   Prop.run "source_render"
@@ -514,6 +628,7 @@ let () =
       render_shape;
       render_colour;
       caret_alignment;
+      unicode_cells;
       huge_line;
       labelled_shape;
       labelled_lines;

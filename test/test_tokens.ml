@@ -106,7 +106,7 @@ let gen_lex_input =
            [
              (3, oneof_list [ 'a'; 'b'; 'c' ]); (2, return ' '); (1, return '?');
            ])
-      (int_bound 20))
+      (Prop.bound 20))
 
 let tokenize_prop =
   Prop.test ~name:"tokenize: spans tile the input; bad char is a diagnostic"
@@ -132,7 +132,12 @@ let tokenize_prop =
               at := sp.stop)
             toks;
           !ok && spaces !at n
-      | Error [ d ], Some i -> (D.span d).start = i
+      | Error [ d ], Some i ->
+          (* everything before the first '?' is valid, so the report follows
+             from the lexer alone *)
+          D.message d = "expected word, 'c', \"cc\", or end of input, found '?'"
+          && D.found d = Some "'?'"
+          && D.span d = P.Span.make ~start:i ~stop:(i + 1)
       | _ -> false)
 
 (* The same small language, parsed from text and from tokens *)
@@ -231,7 +236,7 @@ let gen_source =
   let open Gen in
   let atom = oneof_list [ [ "x" ]; [ "yz" ]; [ "1" ]; [ "23" ] ] in
   let expr =
-    sized_size (int_bound 4)
+    sized_size (Prop.bound 4)
       (fix (fun self n ->
            if n = 0 then atom
            else
@@ -296,24 +301,31 @@ let language_agreement =
           | _ -> false))
 
 let lexer_error_comes_first =
-  Prop.test ~name:"language: a bad character is a lexer error at it"
-    ~print:(fun (s, _) -> String.escaped s)
-    Gen.(
-      let* s = gen_source in
-      let* i = int_bound (String.length s) in
-      return (String.sub s 0 i ^ "?" ^ String.sub s i (String.length s - i), i))
-    (fun (s, i) ->
+  Prop.test ~name:"language: a bad character is a lexer error exactly at it"
+    ~print:(fun (before, after) ->
+      Printf.sprintf "%s ? %s" (String.escaped before) (String.escaped after))
+    Gen.(pair gen_source gen_source)
+    (fun (before, after) ->
+      let s = before ^ "?" ^ after in
+      let i = String.length before in
+      (* [before] is a sequence of valid tokens, so the lexer fails at the
+         '?', having tried every kind of token (and the end of input). *)
       (match lang_lexer s with
-        | Error [ d ] -> (D.span d).start <= i
+        | Error [ d ] ->
+            D.message d
+            = "expected identifier, integer, '(', ')', '*', '+', \"<-\", \
+               \"==\", or end of input, found '?'"
+            && D.found d = Some "'?'"
+            && D.span d = P.Span.make ~start:i ~stop:(i + 1)
         | _ -> false)
       &&
+      (* the text grammar may fail earlier, never later *)
       match P.parse Text_lang.program s with
-      | Error (d :: _) -> (D.span d).start <= String.index s '?'
+      | Error (d :: _) -> (D.span d).start <= i
       | _ -> false)
 
 let stack_safety =
-  Prop.test ~count:1 ~name:"100000 tokens: lexing and parsing are stack-safe"
-    Gen.unit (fun () ->
+  Prop.once ~name:"100000 tokens: lexing and parsing are stack-safe" (fun () ->
       let n = 100_000 in
       let s = String.concat " " (List.init n string_of_int) in
       match lang_lexer s with
@@ -358,7 +370,7 @@ let tokens_recovering =
     ~name:"tokens with parse_partial returns the warnings and recovered errors"
     ~print:Print.(list string)
     Gen.(
-      list_size (int_bound 8)
+      list_size (Prop.bound 8)
         (oneof
            [
              map string_of_int (int_bound 30);

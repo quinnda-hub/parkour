@@ -79,7 +79,19 @@ let gen_table : table Gen.t =
       (list_size (int_range 1 3)
          (pair (oneof_list [ `Pre; `Post; `In; `In ]) (int_range 0 11)))
   in
-  map assign (list_size (int_range 1 4) level)
+  (* At least one infix operator, or most expectations would be vacuous. *)
+  let with_infix levels =
+    if
+      List.exists (fun (_, es) -> List.exists (fun (k, _) -> k = `In) es) levels
+    then levels
+    else
+      match levels with
+      | (assoc, es) :: rest -> (assoc, (`In, 0) :: es) :: rest
+      | [] -> []
+  in
+  map
+    (fun levels -> assign (with_infix levels))
+    (list_size (int_range 1 4) level)
 
 let table_ops (t : table) = List.concat t
 
@@ -271,7 +283,7 @@ let gen_tokens (t : table) =
                ([ 'x'; '('; ')'; '#' ] @ List.init 4 (String.get pool))) );
       ]
   in
-  int_range 0 4 >>= go >>= mutate
+  Prop.range 0 4 >>= go >>= mutate
 
 let gen_case = Gen.(gen_table >>= fun t -> map (fun s -> (t, s)) (gen_tokens t))
 let print_case (t, s) = Printf.sprintf "%s on %S" (show_table t) s
@@ -304,7 +316,7 @@ let gen_ast (t : table) =
                   (go (fuel / 2)) );
         ]
   in
-  int_range 0 5 >>= go
+  Prop.range 0 5 >>= go
 
 let rec print_full = function
   | X -> "x"
@@ -333,12 +345,8 @@ let roundtrip =
       | Error _ -> false)
 
 (* What [char c] says it expects. *)
-let literal c =
-  match P.parse (P.char c) "#" with
-  | Error (d :: _) -> D.expected d
-  | _ -> failwith "char accepted '#'"
-
-let subset l l' = List.for_all (fun e -> List.mem e l') l
+let literal c = P.Expected.Literal (String.make 1 c)
+let expectations l = List.sort_uniq P.Expected.compare l
 
 let errors_expect_operators =
   Prop.test
@@ -348,9 +356,10 @@ let errors_expect_operators =
       match run P.(p <* eof) "x#" with
       | E d ->
           (D.span d).start = 1
-          && subset
-               (List.concat_map literal (syms Postfix_k t @ infix_syms t))
-               (D.expected d)
+          && D.expected d
+             = expectations
+                 (P.Expected.End_of_input
+                 :: List.map literal (syms Postfix_k t @ infix_syms t))
       | V _ -> false)
 
 let errors_expect_operands =
@@ -358,13 +367,16 @@ let errors_expect_operands =
     ~name:"after an infix operator, errors expect prefix operators and the term"
     ~print:show_table gen_table (fun t ->
       let p = P.expression atom (to_parkour t) in
-      let expected = List.concat_map literal (syms Prefix_k t) @ literal 'x' in
-      List.for_all
-        (fun c ->
-          match run P.(p <* eof) (Printf.sprintf "x%c#" c) with
-          | E d -> (D.span d).start = 2 && subset expected (D.expected d)
-          | V _ -> false)
-        (infix_syms t))
+      let expected =
+        expectations (literal 'x' :: List.map literal (syms Prefix_k t))
+      in
+      infix_syms t <> []
+      && List.for_all
+           (fun c ->
+             match run P.(p <* eof) (Printf.sprintf "x%c#" c) with
+             | E d -> (D.span d).start = 2 && D.expected d = expected
+             | V _ -> false)
+           (infix_syms t))
 
 let chained_error =
   Prop.test ~name:"a chained non-associative operator is reported at the second"
@@ -390,14 +402,45 @@ let obs = function
   | E d -> `Error (D.message d, D.span d, D.expected d)
 
 let gen_input alphabet =
-  Gen.string_size ~gen:(Gen.oneof_list alphabet) (Gen.int_range 0 8)
+  Gen.string_size ~gen:(Gen.oneof_list alphabet) (Prop.bound 8)
 
 let leaf = P.(char 'x' >>| String.make 1)
 let plus = P.(char '+' >>| fun _ a b -> "(" ^ a ^ "+" ^ b ^ ")")
 
+(* [x+x+...+x] with several operators, valid or damaged at one place. Random
+   strings over [x+#] seldom reach two operators. *)
+let gen_chain =
+  Gen.(
+    let* operands = Prop.range 1 5 in
+    let valid = String.concat "+" (List.init operands (fun _ -> "x")) in
+    let n = String.length valid in
+    oneof_weighted
+      [
+        (4, return valid);
+        (1, map (fun k -> String.sub valid 0 k) (int_bound n));
+        (1, return (valid ^ "+"));
+        (1, return (valid ^ "#"));
+        ( 1,
+          map
+            (fun k -> String.sub valid 0 k ^ "#" ^ String.sub valid k (n - k))
+            (int_bound n) );
+        ( 1,
+          map
+            (fun k -> String.sub valid 0 k ^ "+" ^ String.sub valid k (n - k))
+            (int_bound n) );
+      ])
+
+let operators s =
+  List.length (List.filter (( = ) '+') (List.of_seq (String.to_seq s)))
+
 let law name expected actual =
   Prop.test ~name ~print:(Printf.sprintf "%S")
-    (gen_input [ 'x'; '+'; '#' ])
+    ~collect:(fun s ->
+      match operators s with
+      | 0 -> "no operator"
+      | 1 -> "one operator"
+      | _ -> "two or more operators")
+    gen_chain
     (fun s -> obs (run expected s) = obs (run actual s))
 
 let chainl1_law =
@@ -418,8 +461,7 @@ let between_law =
 (* Robustness. 10^6 chains: see test_robustness.ml. *)
 
 let robustness =
-  Prop.test ~count:1 ~name:"very long chains parse without stack overflow"
-    Gen.unit (fun () ->
+  Prop.once ~name:"very long chains parse without stack overflow" (fun () ->
       let n = 100_000 in
       let one = P.(char '1' >>| fun _ -> 1) in
       let add = P.(char '+' >>| fun _ a b -> a + b) in
@@ -429,7 +471,7 @@ let robustness =
       let value' p s = P.parse p s = Ok (n + 1) in
       value (P.expression one [ [ P.Infix_left add ] ]) chain
       && value (P.expression one [ [ P.Infix_right add ] ]) chain
-      && value (P.expression one [ [ P.Infix_none add ] ]) "1+1" = false
+      && P.parse (P.expression one [ [ P.Infix_none add ] ]) "1+1" = Ok 2
       && value (P.chainl1 one add) chain
       && value (P.chainr1 one add) chain
       && value'

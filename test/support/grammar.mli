@@ -40,9 +40,15 @@ val gen : cuts:bool -> t QCheck2.Gen.t
     repetitions (hence [Grammar_error]) occur naturally. *)
 
 val gen_input : string QCheck2.Gen.t
-(** Strings over [{a,b,c}] of length at most 8. *)
+(** Strings over [{a,b,c}], short (see {!Prop.bound}). *)
 
-val compile : t -> string Parkour.t
+val gen_matching : cuts:bool -> (t * string) QCheck2.Gen.t
+(** A grammar and an input derived from it (what each construct would accept,
+    concatenated). Often accepted, not always: a repetition may take more than
+    its share, a [Cut] may commit before the alternative that was meant. *)
+
+val compile : ?on_cut:(unit -> unit) -> t -> string Parkour.t
+(** [on_cut] is called each time a [Cut] runs. *)
 
 (** The same compilation over any parser on [char] tokens, for comparing inputs.
     Text-only primitives ([Str], [Take_while], [Take_while1]) are rewritten into
@@ -52,11 +58,12 @@ module Compile (P : Parkour.S with type token = char) : sig
   val compile : t -> string P.t
 end
 
-val children : t -> t list
-(** Immediate sub-grammars. *)
-
 val erase_cuts : t -> t
 (** Replaces every [Cut] by an equally nullable parser that does not commit. *)
+
+val erase_absorbed_cuts : t -> t
+(** Like {!erase_cuts}, but only for the cuts under [Attempt], [Lookahead] or
+    [Not_followed_by] (which absorb commitment). *)
 
 (** The oracle. Both functions raise [Parkour.Grammar_error] exactly when a
     zero-width repetition iteration is reached. *)

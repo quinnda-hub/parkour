@@ -28,7 +28,7 @@ let decls =
 
 let gen_decls =
   Gen.(
-    list_size (int_range 1 6)
+    list_size (Prop.range 1 6)
       (pair
          (string_size ~gen:(char_range 'a' 'z') (int_range 1 4))
          (int_bound 999)))
@@ -103,7 +103,7 @@ let gen_noise =
   Gen.(
     string_size
       ~gen:(oneof_list [ 'a'; '='; '{'; '}'; ';'; ' ' ])
-      (int_bound 40))
+      (Prop.bound 40))
 
 let terminates =
   Prop.test ~name:"recovery terminates; Some means finished, None means stopped"
@@ -156,6 +156,37 @@ let emit_contract =
           && List.exists (fun d -> d == e) log = ran
           && (sev = `Error || Result.is_ok result = Result.is_ok plain))
 
+(* The log is ordered by where diagnostics point, and diagnostics that point
+   to the same place stay in the order they were emitted. *)
+let emission_order =
+  Prop.test ~name:"log: ordered by start, equal starts in emission order"
+    ~print:Print.(list (pair int bool))
+    Gen.(list_size (Prop.range 0 12) (pair (int_bound 3) bool))
+    (fun emitted ->
+      let named =
+        List.mapi
+          (fun i (start, error) ->
+            (Printf.sprintf "d%d" i, start, if error then `Error else `Warning))
+          emitted
+      in
+      let p =
+        List.fold_left
+          (fun acc (name, start, severity) ->
+            P.(
+              acc
+              *> emit
+                   (D.make ~severity
+                      ~span:(P.Span.make ~start ~stop:start)
+                      name)))
+          (P.return ()) named
+      in
+      let expected =
+        List.map
+          (fun (name, _, _) -> name)
+          (List.stable_sort (fun (_, a, _) (_, b, _) -> compare a b) named)
+      in
+      List.map D.message (snd (P.parse_partial p "")) = expected)
+
 (* Transactional diagnostics *)
 
 (* Grammars over [a b c] whose every character logs a warning at its
@@ -196,6 +227,13 @@ let rec show = function
   | Skip_to g -> "skip_to(" ^ show g ^ ")"
   | Skip_past g -> "skip_past(" ^ show g ^ ")"
 
+let ticking p =
+  P.map
+    (fun x ->
+      Prop.tick ();
+      x)
+    p
+
 let rec compile =
   let open P in
   function
@@ -205,11 +243,14 @@ let rec compile =
   | Seq (a, b) -> compile a *> compile b
   | Alt (a, b) -> compile a <|> compile b
   | Choice l -> choice (List.map compile l)
-  | Many g -> skip_many (compile g)
+  | Many g -> skip_many (ticking (compile g))
   | Opt g -> option () (compile g)
-  | Sep_by (sep, g) -> sep_by ~sep:(compile sep) (compile g) >>| ignore
-  | Sep_end_by (sep, g) -> sep_end_by ~sep:(compile sep) (compile g) >>| ignore
-  | Many_till (p, stop) -> many_till (compile p) (compile stop) >>| ignore
+  | Sep_by (sep, g) ->
+      sep_by ~sep:(compile sep) (ticking (compile g)) >>| ignore
+  | Sep_end_by (sep, g) ->
+      sep_end_by ~sep:(compile sep) (ticking (compile g)) >>| ignore
+  | Many_till (p, stop) ->
+      many_till (ticking (compile p)) (compile stop) >>| ignore
   | Look g -> lookahead (compile g)
   | Not g -> not_followed_by (compile g)
   | Recover g -> recover ~catch:`Any ~sync:any ~fallback:ignore (compile g)
@@ -248,33 +289,168 @@ let gen_g ~extended =
         ]
       else [])
   in
-  sized_size (int_bound 8)
+  sized_size (Prop.bound 8)
     (fix (fun self n -> if n <= 0 then leaf else node self n))
 
-(* With recovery in the grammar, skipped input is unmarked, so only check that
-   the warnings of the successful derivation come in increasing positions,
-   each once, below the end: a leaked marker is re-read, so it repeats or
-   lies out of order. *)
-let abandoned_branches_leave_nothing ~extended =
+(* The log of a run, against a transactional model: a straightforward
+   interpreter that threads the log through the grammar and drops it back
+   wherever the contract says a branch is forgotten. Warnings are the [Chr]
+   markers and errors are recoveries (found at an offset, deduped against the
+   latest one) and the final failure. For the failure position it tracks the
+   furthest live failure: [Done (pos, hint)], [Failed furthest]. *)
+type entry = Warn of int | Err of int
+type res = Done of int * int | Failed of int
+
+exception Zero_width
+
+let model_run g s =
+  let n = String.length s in
+  let record_err f log =
+    match List.find_opt (function Err _ -> true | Warn _ -> false) log with
+    | Some (Err g) when g = f -> log
+    | _ -> Err f :: log
+  in
+  let rec go g pos log =
+    match g with
+    | Chr c ->
+        let log = Warn pos :: log in
+        if pos < n && s.[pos] = c then (Done (pos + 1, -1), log)
+        else (Failed pos, log)
+    | Seq (a, b) -> (
+        match go a pos log with
+        | (Failed _ as r), log -> (r, log)
+        | Done (p1, h1), log -> (
+            match go b p1 log with
+            | Failed e, log -> (Failed (max e h1), log)
+            | Done (p2, h2), log -> (Done (p2, max h1 h2), log)))
+    | Alt (a, b) -> (
+        match go a pos log with
+        | (Done _ as r), log -> (r, log)
+        | Failed ea, _ -> (
+            match go b pos log with
+            | Done (p, h), l -> (Done (p, max h ea), l)
+            | Failed eb, l -> (Failed (max ea eb), l)))
+    | Choice alternatives ->
+        let rec first errs = function
+          | [] -> (Failed (List.fold_left max pos errs), log)
+          | p :: rest -> (
+              match go p pos log with
+              | Done (q, h), l -> (Done (q, List.fold_left max h errs), l)
+              | Failed e, _ -> first (e :: errs) rest)
+        in
+        first [] alternatives
+    | Many g ->
+        let rec loop pos log hint =
+          match go g pos log with
+          | Done (p, h), l ->
+              if p = pos then raise Zero_width;
+              loop p l (max hint h)
+          | Failed e, _ -> (Done (pos, max hint e), log)
+        in
+        loop pos log (-1)
+    | Opt g -> (
+        match go g pos log with
+        | (Done _ as r), l -> (r, l)
+        | Failed e, _ -> (Done (pos, e), log))
+    | Sep_by (sep, g) -> (
+        match go g pos log with
+        | Failed e, _ -> (Done (pos, e), log)
+        | Done (p1, h1), log1 ->
+            let rec loop pos log hint =
+              match go sep pos log with
+              | Failed e, _ -> (Done (pos, max hint e), log)
+              | Done (ps, hs), l -> (
+                  match go g ps l with
+                  | Failed e, _ -> (Done (pos, max hint (max hs e)), log)
+                  | Done (pg, hg), l2 ->
+                      if pg = pos then raise Zero_width;
+                      loop pg l2 (max hint (max hs hg)))
+            in
+            loop p1 log1 h1)
+    | Sep_end_by (sep, g) -> (
+        match go g pos log with
+        | Failed e, _ -> (Done (pos, e), log)
+        | Done (p1, h1), log1 ->
+            let rec loop pos log hint =
+              match go sep pos log with
+              | Failed e, _ -> (Done (pos, max hint e), log)
+              | Done (ps, hs), l -> (
+                  let hint = max hint hs in
+                  match go g ps l with
+                  | Done (pg, hg), l2 ->
+                      if pg = pos then raise Zero_width;
+                      loop pg l2 (max hint hg)
+                  | Failed e, _ -> (Done (ps, max hint e), l))
+            in
+            loop p1 log1 h1)
+    | Many_till (g, stop) ->
+        let rec loop pos log hint =
+          match go stop pos log with
+          | Done (ps, hs), l -> (Done (ps, max hint hs), l)
+          | Failed es, _ -> (
+              match go g pos log with
+              | Done (pp, hp), l ->
+                  if pp = pos then raise Zero_width;
+                  loop pp l (max hint (max es hp))
+              | Failed ep, l -> (Failed (max hint (max es ep)), l))
+        in
+        loop pos log (-1)
+    | Look g -> (
+        match go g pos log with
+        | Done _, _ -> (Done (pos, -1), log)
+        | (Failed _ as r), _ -> (r, log))
+    | Not g -> (
+        match go g pos log with
+        | Failed _, _ -> (Done (pos, -1), log)
+        | Done _, _ -> (Failed pos, log))
+    | Recover g -> (
+        match go g pos log with
+        | (Done _ as r), l -> (r, l)
+        | Failed e, l ->
+            if e < n then (Done (e + 1, -1), record_err e l) else (Failed e, l))
+    | Or_insert c ->
+        if pos < n && s.[pos] = c then (Done (pos + 1, -1), Warn pos :: log)
+        else (Done (pos, -1), record_err pos log)
+    | Skip_to g -> skip ~past:false g pos log
+    | Skip_past g -> skip ~past:true g pos log
+  and skip ~past g pos log =
+    let rec scan q =
+      match go g q log with
+      | Done (e, _), _ -> Done ((if past then e else q), -1)
+      | Failed _, _ -> if q >= n then Done (q, -1) else scan (q + 1)
+    in
+    (scan pos, log)
+  in
+  match go g 0 [] with
+  | Done (p, _), log -> (Some p, log)
+  | Failed e, log -> (None, record_err e log)
+
+(* What [parse_partial] reports: errors and warnings by where they point,
+   stable among equal places. *)
+let observed_log log = List.map (fun d -> (D.is_error d, start_of d)) log
+
+let model_log log =
+  let at = function Warn p -> (false, p) | Err p -> (true, p) in
+  List.stable_sort (fun (_, a) (_, b) -> compare a b) (List.rev_map at log)
+
+let transactional_log =
   Prop.test
     ~name:
-      ("diagnostics of abandoned branches never appear"
-      ^ if extended then " (with recovery)" else "")
+      "diagnostics: the log is exactly that of the successful path, abandoned \
+       branches and failed recoveries leave nothing"
     ~print:(fun (g, s) -> Printf.sprintf "%s on %S" (show g) s)
-    (Gen.pair (gen_g ~extended) Parkour_test_support.Grammar.gen_input)
+    (Gen.pair (gen_g ~extended:true) Parkour_test_support.Grammar.gen_input)
     (fun (g, s) ->
       let p = P.(compile g *> position <* skip_many any) in
-      match P.parse_partial p s with
-      | exception P.Grammar_error _ -> true
-      | None, _ -> true
-      | Some stop, log ->
-          let marks =
-            List.map start_of (List.filter (fun d -> not (D.is_error d)) log)
-          in
-          if extended then
-            List.for_all (fun m -> m < stop) marks
-            && List.sort_uniq compare marks = marks
-          else marks = List.init stop Fun.id)
+      let engine =
+        try Some (P.parse_partial p s) with P.Grammar_error _ -> None
+      in
+      let model = try Some (model_run g s) with Zero_width -> None in
+      match (engine, model) with
+      | None, None -> true
+      | Some (value, log), Some (stop, entries) ->
+          value = stop && observed_log log = model_log entries
+      | _ -> false)
 
 (* [quoted]'s escape handling turns a failing [escape] into its own error: what
    [escape] logged before failing must go. *)
@@ -376,7 +552,7 @@ let skipping =
       triple
         (string_size
            ~gen:(oneof_list [ '('; ')'; '{'; '}'; ';'; 'a' ])
-           (int_bound 12))
+           (Prop.bound 12))
         bool
         (oneof_list [ None; Some ('(', ')'); Some ('{', '}') ]))
     (fun (s, past, nested) ->
@@ -398,66 +574,217 @@ let limit =
       let value, log = P.parse_partial ~max_errors:k p input in
       List.length (errors log) = min n k && value = Some (List.init n ignore))
 
-type op = Insert | Emit_error of int | Emit_warning of int
+(* Tokens whose spans are chosen freely (gaps, any order), to tell offsets
+   from token indices, and a token's span from where a failure is found. *)
+module Chars = P.Tokens (struct
+  type t = char
 
-let dedupe =
+  let equal = Char.equal
+  let show = String.make 1
+end)
+
+(* The span the fallback receives runs from where the recovered parser started
+   (not from the failure) to where [sync] stopped, whatever lies between the
+   tokens. *)
+let fallback_span =
   Prop.test
-    ~name:"only recovery errors are deduped, against the latest recovery error"
-    ~print:
-      Print.(
-        list (function
-          | Insert -> "insert"
-          | Emit_error i -> "error " ^ string_of_int i
-          | Emit_warning i -> "warning " ^ string_of_int i))
+    ~name:
+      "recover: the fallback gets the span from the parser's start to where \
+       sync stopped"
+    ~print:(fun (before, junk, gaps, past) ->
+      Printf.sprintf "%d before, junk %S, gaps %s, %s" before junk
+        (Print.(list int) gaps)
+        (if past then "skip_past" else "skip_to"))
     Gen.(
-      list_size (int_bound 10)
-        (oneof
-           [
-             return Insert;
-             map (fun i -> Emit_error i) (int_bound 3);
-             map (fun i -> Emit_warning i) (int_bound 3);
-           ]))
-    (fun ops ->
-      let step = function
-        | Insert -> P.or_insert () P.(char 'x' >>| ignore)
-        | Emit_error i -> P.emit (diag `Error i)
-        | Emit_warning i -> P.emit (diag `Warning i)
+      let* before = int_bound 3 in
+      let* junk =
+        string_size ~gen:(oneof_list [ '!'; '?'; 'x' ]) (int_range 1 4)
       in
-      let p =
-        List.fold_left (fun acc op -> P.(acc *> step op)) (P.return ()) ops
+      let* gaps =
+        list_size (return (before + String.length junk + 2)) (int_bound 3)
       in
-      (* All insertions fail at 0, so they are one cascade. *)
-      let emitted = List.length (List.filter (fun o -> o <> Insert) ops) in
-      let _, log = P.parse_partial p "" in
-      List.length log = emitted + if List.mem Insert ops then 1 else 0)
-
-(* The cascade rule is about where the failure was found, not where the
-   diagnostic points: a missing token (shown at the end of the previous token)
-   followed by an error at the same next token is one error. *)
-let dedupe_insertion_point =
-  Prop.test ~name:"an insertion and an error at the same found token are one"
-    ~print:String.escaped
-    Gen.(string_size ~gen:(oneof_list [ ' '; '\n' ]) (int_bound 4))
-    (fun trivia ->
-      let module L = (val P.Lexeme.make ()) in
-      let p =
+      let* past = bool in
+      return (before, junk, gaps, past))
+    (fun (before, junk, gaps, past) ->
+      (* [p* a junk ;]: the error is at the first junk character. *)
+      let chars = String.make before 'p' ^ "a" ^ junk ^ ";" in
+      let last = String.length chars - 1 in
+      let stop_index = if past then last else last - 1 in
+      let body_start = before in
+      (* Text: consecutive characters *)
+      let text_parser sync =
         P.(
-          L.symbol "a"
-          *> or_insert () (map ignore (L.symbol ";"))
-          *> recover ~catch:`Any ~sync:(skip_to eof)
-               ~fallback:(fun _ -> ())
-               (map ignore (L.symbol "b")))
+          skip_many (char 'p')
+          *> recover ~sync ~fallback:Fun.id
+               (char 'a' *> cut *> char 'b' >>| fun _ -> Span.point 0)
+          <* skip_many any)
       in
-      match P.parse_partial p ("a" ^ trivia ^ "#") with
-      | _, [ d ] -> (D.span d).start = 1 && D.message d <> ""
-      | _ -> false)
+      let text_sync =
+        if past then P.skip_past (P.char ';') else P.skip_to (P.char ';')
+      in
+      (* Tokens: the same, with gaps between the spans *)
+      let starts =
+        let at = ref 0 in
+        List.map
+          (fun gap ->
+            at := !at + gap;
+            let s = !at in
+            incr at;
+            s)
+          gaps
+      in
+      let tokens =
+        Array.of_list
+          (List.mapi
+             (fun i s -> (chars.[i], P.Span.make ~start:s ~stop:(s + 1)))
+             starts)
+      in
+      let input = Chars.input ~source:(String.make 40 ' ') tokens in
+      let token_parser =
+        Chars.(
+          skip_many (token 'p')
+          *> recover
+               ~sync:
+                 (if past then skip_past (token ';') else skip_to (token ';'))
+               ~fallback:Fun.id
+               (token 'a' *> cut *> token 'b' >>| fun _ -> P.Span.point 0)
+          <* skip_many any)
+      in
+      let at i = List.nth starts i in
+      fst (P.parse_partial (text_parser text_sync) chars)
+      = Some (P.Span.make ~start:body_start ~stop:(stop_index + 1))
+      && fst (Chars.parse_partial token_parser input)
+         = Some (P.Span.make ~start:(at body_start) ~stop:(at stop_index + 1)))
+
+(* Recoveries are deduped against the latest recovery error, by the offset
+   where the failure was found; where the diagnostic points (for a missing
+   token, just after the previous one) has nothing to do with it. Offsets here
+   are free, so they need not grow. Steps: a word and some trivia tokens after
+   it, a missing ';' inserted, a bad token recovered from, and emitted
+   diagnostics anywhere. *)
+type step =
+  | Word of int  (** trivia tokens after the word *)
+  | Insert
+  | Skip
+  | Emit_error of int
+  | Emit_warning of int
+
+let show_step = function
+  | Word k -> Printf.sprintf "word+%d" k
+  | Insert -> "insert"
+  | Skip -> "skip"
+  | Emit_error i -> Printf.sprintf "error@%d" i
+  | Emit_warning i -> Printf.sprintf "warning@%d" i
+
+let eof_offset = 100
+
+let dedupe_by_found_offset =
+  Prop.test
+    ~name:
+      "recovery errors are deduped by the offset where the failure was found, \
+       against the latest one; emitted diagnostics never"
+    ~print:(fun (steps, offsets) ->
+      Printf.sprintf "%s with token offsets %s"
+        (String.concat "; " (List.map show_step steps))
+        (Print.(list int) offsets))
+    Gen.(
+      let* rest =
+        list_size (Prop.range 1 10)
+          (oneof_weighted
+             [
+               (3, map (fun k -> Word k) (int_bound 2));
+               (4, return Insert);
+               (2, return Skip);
+               (1, map (fun i -> Emit_error i) (int_bound 5));
+               (1, map (fun i -> Emit_warning i) (int_bound 5));
+             ])
+      in
+      let steps = Word 1 :: rest in
+      let tokens =
+        List.fold_left
+          (fun n -> function Word k -> n + 1 + k | Skip -> n + 1 | _ -> n)
+          0 steps
+      in
+      (* Spans start at small offsets, repeated and out of order. *)
+      let* offsets = list_size (return tokens) (int_bound 6) in
+      return (steps, offsets))
+    (fun (steps, offsets) ->
+      let tokens =
+        List.concat_map
+          (function
+            | Word k -> 'w' :: List.init k (fun _ -> 's')
+            | Skip -> [ 'j' ]
+            | _ -> [])
+          steps
+      in
+      let input =
+        Chars.input
+          ~source:(String.make eof_offset ' ')
+          (Array.of_list
+             (List.map2
+                (fun c o -> (c, P.Span.make ~start:o ~stop:(o + 1)))
+                tokens offsets))
+      in
+      let step = function
+        | Word _ -> Chars.(token 'w' *> trivia (skip_many (token 's')))
+        | Insert -> Chars.(or_insert () (token ';' >>| ignore))
+        | Skip ->
+            Chars.(
+              recover ~catch:`Any ~sync:any ~fallback:ignore
+                (token 'z' >>| ignore))
+        | Emit_error i -> Chars.emit (diag `Error i)
+        | Emit_warning i -> Chars.emit (diag `Warning i)
+      in
+      let p =
+        List.fold_left
+          (fun acc s -> Chars.(acc *> step s))
+          (Chars.return ()) steps
+      in
+      (* The model *)
+      let off = Array.of_list offsets in
+      let count = Array.length off in
+      let start_at i = if i < count then off.(i) else eof_offset in
+      let log = ref [] (* newest first: (is_error, shown, found option) *)
+      and pos = ref 0
+      and trivia = ref None in
+      let recovery ~shown ~found =
+        let latest = List.find_map (fun (_, _, f) -> f) !log in
+        if latest <> Some found then log := (true, shown, Some found) :: !log
+      in
+      List.iter
+        (function
+          | Word k ->
+              pos := !pos + 1;
+              if k > 0 then trivia := Some (!pos, !pos + k);
+              pos := !pos + k
+          | Insert ->
+              let shown =
+                match !trivia with
+                | Some (a, b) when b = !pos -> start_at a
+                | _ ->
+                    if !pos > 0 then start_at (!pos - 1) + 1 else start_at !pos
+              in
+              recovery ~shown ~found:(start_at !pos)
+          | Skip ->
+              recovery ~shown:(start_at !pos) ~found:(start_at !pos);
+              pos := !pos + 1
+          | Emit_error i -> log := (true, i, None) :: !log
+          | Emit_warning i -> log := (false, i, None) :: !log)
+        steps;
+      let expected =
+        List.stable_sort
+          (fun (_, a) (_, b) -> compare a b)
+          (List.rev_map (fun (e, shown, _) -> (e, shown)) !log)
+      in
+      let value, got = Chars.parse_partial p input in
+      value <> None && observed_log got = expected)
 
 (* or_insert *)
 
 let inserting =
   Prop.test ~name:"or_insert logs each missing token once and continues"
     ~print:Print.(list bool)
-    Gen.(list_size (int_bound 8) bool)
+    Gen.(list_size (Prop.bound 8) bool)
     (fun present ->
       let input =
         String.concat "" (List.map (fun b -> if b then "a;" else "a") present)
@@ -487,29 +814,112 @@ let insertion_start p input =
   | Some (), [ d ] -> Some (start_of d)
   | _ -> None
 
-(* Branches that consume trivia (before and after an 'x') and are then
-   forgotten. *)
-let abandoned_trivia = function
-  | 0 -> P.return ()
-  | 1 -> P.(lookahead (any_char *> whitespace))
-  | 2 -> P.(optional (any_char *> whitespace *> char '!') >>| ignore)
-  | _ -> P.(any_char *> whitespace *> char '!' >>| ignore <|> return ())
+(* A parser whose [on]th run logs a warning, consumes trivia and then fails,
+   and that does nothing on the others. *)
+let fails_after_trivia ~on =
+  let calls = ref 0 in
+  P.(
+    let* () = return () in
+    incr calls;
+    if !calls = on then
+      let* pos = position in
+      emit (diag `Warning pos) *> whitespace *> fail "no"
+    else return ())
 
-let insertion_unchanged_by_forgotten_trivia =
+(* Constructs that forget a branch (a failure, or a lookahead) after it
+   consumed trivia, and where else they report something: the offset where
+   the input after the 'x' starts. *)
+let forgetting_constructs =
+  [
+    ("alt", (fun () -> P.(fails_after_trivia ~on:1 <|> return ())), fun _ -> []);
+    ( "choice",
+      (fun () -> P.(choice [ fails_after_trivia ~on:1; return () ])),
+      fun _ -> [] );
+    ( "skip_many",
+      (fun () -> P.(skip_many (fails_after_trivia ~on:1))),
+      fun _ -> [] );
+    ( "sep_end_by, separator",
+      (fun () ->
+        P.(sep_end_by ~sep:(fails_after_trivia ~on:1) (return ()) >>| ignore)),
+      fun _ -> [] );
+    ( "sep_end_by, item",
+      (fun () ->
+        P.(sep_end_by ~sep:(return ()) (fails_after_trivia ~on:2) >>| ignore)),
+      fun _ -> [] );
+    ( "many_till",
+      (fun () ->
+        P.(
+          many_till (skip_while is_space) (fails_after_trivia ~on:1) >>| ignore)),
+      fun _ -> [] );
+    ( "lookahead",
+      (fun () ->
+        P.(
+          lookahead
+            (let* pos = position in
+             emit (diag `Warning pos) *> whitespace))),
+      fun _ -> [] );
+    ( "not_followed_by",
+      (fun () -> P.not_followed_by (fails_after_trivia ~on:1)),
+      fun _ -> [] );
+    ( "skip_to",
+      (fun () -> P.(skip_to (fails_after_trivia ~on:1) >>| ignore)),
+      fun _ -> [] );
+    (* A closer that fails where it starts: the missing token is inserted *)
+    ( "between ~or_insert",
+      (fun () ->
+        P.(
+          between ~or_insert:true (return ())
+            (let* pos = position in
+             emit (diag `Warning pos) *> (char ')' >>| ignore))
+            (return ())
+          >>| ignore)),
+      fun after_x -> [ after_x ] );
+    (* A recovery that cannot synchronise (its [sync] consumes trivia, then
+       fails) is forgotten by the recovery around it, which records the
+       original failure where it was found. *)
+    ( "recover, failed synchronisation",
+      (fun () ->
+        P.(
+          recover ~catch:`Any ~sync:(skip_to eof) ~fallback:ignore
+            (recover ~catch:`Any
+               ~sync:
+                 (let* pos = position in
+                  emit (diag `Warning pos) *> whitespace *> fail "stuck")
+               ~fallback:ignore
+               (char '!' >>| ignore))
+          >>| ignore)),
+      fun after_x -> [ after_x ] );
+  ]
+
+let forgotten_branches_leave_nothing =
   Prop.test
     ~name:
-      "the insertion point ignores trivia of lookaheads and abandoned branches"
-    ~print:(fun (ws1, ws2, kind) ->
-      Printf.sprintf "a%Sx%S, branch %d" ws1 ws2 kind)
-    Gen.(triple gen_ws gen_ws (int_bound 3))
-    (fun (ws1, ws2, kind) ->
+      "forgotten branches (lookahead, alternatives, loops, skipping, failed \
+       recovery) leave no diagnostics and no trivia behind"
+    ~print:(fun (ws1, ws2) -> Printf.sprintf "a%Sx%S" ws1 ws2)
+    Gen.(
+      pair gen_ws
+        (string_size ~gen:(oneof_list [ ' '; '\n'; '\t' ]) (int_range 1 3)))
+    (fun (ws1, ws2) ->
       let input = "a" ^ ws1 ^ "x" ^ ws2 in
-      let p =
-        P.(
-          char 'a' *> whitespace *> abandoned_trivia kind
-          *> or_insert () (char ';' >>| ignore))
-      in
-      insertion_start p input = Some 1)
+      (* A construct forgets trivia that ends where the input does; the
+         parser then reads that stretch as part of 'x' (unmarked), so the
+         missing ';' goes at the end of the input, which no trivia precedes. *)
+      List.for_all
+        (fun (_, construct, elsewhere) ->
+          let p =
+            P.(
+              char 'a' *> whitespace *> char 'x' *> construct ()
+              *> skip_while is_space
+              *> or_insert () (char ';' >>| ignore))
+          in
+          match P.parse_partial P.(p <* skip_many any) input with
+          | Some (), log ->
+              List.map start_of log
+              = List.sort compare
+                  (String.length input :: elsewhere (2 + String.length ws1))
+          | _ -> false)
+        forgetting_constructs)
 
 let insertion_unchanged_by_splitting_trivia =
   Prop.test ~name:"adjacent trivia parsers give the insertion point of one"
@@ -616,8 +1026,8 @@ let recovered_error_not_hidden =
    one, which sees a further error (from the hint of [optional]) and records
    that one only. *)
 let failed_recovery_records_nothing =
-  Prop.test ~count:1 ~name:"a recovery that cannot synchronise records nothing"
-    Gen.unit (fun () ->
+  Prop.once ~name:"a recovery that cannot synchronise records nothing"
+    (fun () ->
       let inner =
         P.(
           recover ~catch:`Any ~sync:(fail "stuck") ~fallback:ignore
@@ -637,8 +1047,8 @@ let () =
       corrupt_one;
       terminates;
       emit_contract;
-      abandoned_branches_leave_nothing ~extended:false;
-      abandoned_branches_leave_nothing ~extended:true;
+      emission_order;
+      transactional_log;
       quoted_escape;
       committed_catch_only;
       abandoned_errors_do_not_count;
@@ -646,12 +1056,12 @@ let () =
       recovered_error_not_hidden;
       failed_recovery_records_nothing;
       recorded_context;
-      insertion_unchanged_by_forgotten_trivia;
+      forgotten_branches_leave_nothing;
       insertion_unchanged_by_splitting_trivia;
       hidden_does_not_move_insertion_point;
       skipping;
       limit;
-      dedupe;
-      dedupe_insertion_point;
+      fallback_span;
+      dedupe_by_found_offset;
       inserting;
     ]

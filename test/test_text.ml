@@ -30,7 +30,7 @@ let expects ?(pos = 0) items = function
   | V _ -> false
 
 let pp_bytes s = Printf.sprintf "%S" s
-let exhaustive name f = Prop.test ~count:1 ~name Gen.unit f
+let exhaustive name f = Prop.once ~name f
 let all_bytes f = List.for_all f (List.init 256 Char.chr)
 
 (* Generators *)
@@ -55,7 +55,7 @@ let gen_scalar =
       (2, range 0x10000 0x10ffff);
     ]
 
-let gen_scalars = Gen.list_size (Gen.int_range 0 12) gen_scalar
+let gen_scalars = Gen.list_size (Prop.range 0 12) gen_scalar
 let encode_scalars l = String.concat "" (List.map utf8 l)
 
 (* Arbitrary bytes, weighted towards UTF-8 lead and continuation bytes, with
@@ -769,7 +769,7 @@ let utf8_take_while =
    see test_robustness.ml. *)
 
 let stack_safety =
-  Prop.test ~count:1 ~name:"stack safety on 10 MB inputs" Gen.unit (fun () ->
+  Prop.once ~name:"stack safety on 10 MB inputs" (fun () ->
       let big = 10_000_000 in
       let module L =
         (val P.Lexeme.make ~line_comments:[ "#" ]

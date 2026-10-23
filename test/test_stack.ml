@@ -26,9 +26,9 @@ let exhausted d =
   | exception _ -> None
 
 let backstop =
-  Prop.test ~count:1
+  Prop.once
     ~name:"a stack overflow is a nesting diagnostic at the deepest entry"
-    QCheck2.Gen.unit (fun () ->
+    (fun () ->
       let input = String.make 1_000_000 '(' in
       let deepest_ok = function
         | Some [ d ] -> (

@@ -37,7 +37,7 @@ let fragments =
 let gen_string =
   Gen.(
     map (String.concat "")
-      (list_size (int_bound 12)
+      (list_size (Prop.bound 12)
          (map (Array.get fragments) (int_bound (Array.length fragments - 1)))))
 
 let gen_nonempty =
@@ -148,7 +148,7 @@ let expected_order =
     (fun (a, b, c) ->
       let cmp = Expected.compare in
       sign (cmp a b) = -sign (cmp b a)
-      && Expected.equal a b = (cmp a b = 0)
+      && Expected.equal a b = (a = b)
       && ((not (cmp a b <= 0 && cmp b c <= 0)) || cmp a c <= 0)
       &&
       let rank = function
@@ -297,8 +297,8 @@ let diag_props =
         | _ -> true
       in
       strictly_sorted got
-      && List.for_all (fun e -> List.exists (Expected.equal e) got) ex
-      && List.for_all (fun e -> List.exists (Expected.equal e) ex) got
+      && List.for_all (fun e -> List.mem e got) ex
+      && List.for_all (fun e -> List.mem e ex) got
       && Diagnostic.is_error d = is_err
       && Format.asprintf "%a" Diagnostic.pp d
          = Printf.sprintf "%s: %s%s: msg"
@@ -306,6 +306,44 @@ let diag_props =
               else Printf.sprintf "bytes %d-%d" span.start span.stop)
              (if is_err then "error" else "warning")
              (match code with None -> "" | Some c -> "[" ^ c ^ "]"))
+
+let annotations_append =
+  let gen_label =
+    Gen.pair span_gen (Gen.oneof_list [ "l1"; "l2"; "l3"; "l4"; "l5" ])
+  in
+  let gen_notes =
+    Gen.(list_size (int_bound 3) (oneof_list [ "n1"; "n2"; "n3" ]))
+  in
+  let show_labels l =
+    String.concat ","
+      (List.map (fun ((s : Span.t), t) -> Printf.sprintf "%s@%d" t s.start) l)
+  in
+  Prop.test ~name:"add_label and add_note append, after the existing ones"
+    ~print:(fun ((l0, n0), (l1, n1)) ->
+      Printf.sprintf "labels [%s] + [%s], notes [%s] + [%s]" (show_labels l0)
+        (show_labels l1) (String.concat "," n0) (String.concat "," n1))
+    Gen.(
+      pair
+        (pair (list_size (int_bound 3) gen_label) gen_notes)
+        (pair (list_size (int_range 1 3) gen_label) gen_notes))
+    (fun ((l0, n0), (l1, n1)) ->
+      let d =
+        Diagnostic.make ~labels:l0 ~notes:n0
+          ~span:(Span.make ~start:0 ~stop:1)
+          "m"
+      in
+      let d' =
+        List.fold_left
+          (fun d note -> Diagnostic.add_note note d)
+          (List.fold_left
+             (fun d (span, text) -> Diagnostic.add_label span text d)
+             d l1)
+          n1
+      in
+      Diagnostic.labels d' = l0 @ l1
+      && Diagnostic.notes d' = n0 @ n1
+      && Diagnostic.span d' = Diagnostic.span d
+      && Diagnostic.message d' = Diagnostic.message d)
 
 let () =
   Prop.run "support_modules"
@@ -319,4 +357,5 @@ let () =
       found_props;
       range_props;
       diag_props;
+      annotations_append;
     ]

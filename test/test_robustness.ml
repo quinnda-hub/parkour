@@ -1,7 +1,7 @@
 (* Hardening tests: named regressions from other libraries' issue trackers,
    and an audit that every loop and every recursive construct is stack-safe,
    depth-limited or rejected. Sizes are fixed (not scaled by --long): each
-   check runs once.
+   check runs once, in both tiers ([Prop.once]).
 
    Already covered elsewhere, and deliberately not repeated here:
    - test_engine.ml "stack safety on 10^6 items": many, many1, sep_by,
@@ -19,7 +19,7 @@ module Prop = Parkour_test_support.Prop
 open QCheck2
 
 let rep n s = String.concat "" (List.init n (fun _ -> s))
-let once name f = Prop.test ~count:1 ~name Gen.unit f
+let once name f = Prop.once ~name f
 let big = 1_000_000
 let too_deep n = Printf.sprintf "nesting too deep (more than %d levels)" n
 
@@ -89,8 +89,20 @@ let angstrom_226 =
 (* Zero-width bodies: every open-ended repetition rejects a body that succeeds
    without consuming, instead of looping. *)
 
+exception Runaway
+
 let zero_width =
-  let z = P.return () in
+  (* A body that gives up after [fuel] runs: a loop that fails to reject it
+     fails the property instead of hanging the suite. *)
+  let fuel = 10_000 in
+  let runs = ref 0 in
+  let z =
+    P.map
+      (fun () ->
+        incr runs;
+        if !runs > fuel then raise Runaway)
+      (P.return ())
+  in
   let cases =
     [
       ("many", fun s -> P.parse (P.many z) s |> ignore);
@@ -111,7 +123,9 @@ let zero_width =
       );
       ( "expression",
         fun s ->
-          P.parse (P.expression z [ [ P.Postfix (P.return Fun.id) ] ]) s
+          P.parse
+            (P.expression z [ [ P.Postfix (P.map (fun () -> Fun.id) z) ] ])
+            s
           |> ignore );
       ("tokenize", fun s -> P.tokenize z s |> ignore);
     ]
@@ -120,7 +134,11 @@ let zero_width =
     (Gen.oneof_list cases) (fun (_, run) ->
       List.for_all
         (fun s ->
-          match run s with () -> false | exception P.Grammar_error _ -> true)
+          runs := 0;
+          match run s with
+          | () -> false
+          | exception P.Grammar_error _ -> true
+          | exception Runaway -> false)
         [ ""; "a"; "ab" ])
 
 (* Stack safety at 10^6 iterations of the loops the other suites do not

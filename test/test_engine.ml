@@ -131,26 +131,40 @@ let law_tests =
    therefore change which branches run even when the whole parse succeeds, e.g.
    [Many (Attempt (Alt (Seq (Cut, Char 'a'), Eof)))] on "". The property is
    stated for grammars with no cut under any of the three. *)
-let rec cut_under_absorber ~under g =
-  match g with
-  | G.Cut -> under
-  | G.Attempt _ | G.Lookahead _ | G.Not_followed_by _ ->
-      List.exists (cut_under_absorber ~under:true) (G.children g)
-  | _ -> List.exists (cut_under_absorber ~under) (G.children g)
+(* Whether a cut ran matters: the rule says nothing about runs that never
+   committed. [collect] reports how often the useful case is generated. *)
+let cut_case (g, s) =
+  let cuts = ref 0 in
+  match P.parse (G.compile ~on_cut:(fun () -> incr cuts) g) s with
+  | exception P.Grammar_error _ -> `Grammar_error
+  | Error _ -> `Error
+  | Ok v -> (
+      let same =
+        match P.parse (G.compile (G.erase_cuts g)) s with
+        | Ok v' -> v = v'
+        | Error _ | (exception P.Grammar_error _) -> false
+      in
+      match (!cuts > 0, same) with
+      | true, true -> `Committed_same
+      | false, true -> `Uncommitted_same
+      | _, false -> `Differs)
+
+let cut_class c =
+  match cut_case c with
+  | `Grammar_error -> "Grammar_error"
+  | `Error -> "failure"
+  | `Committed_same -> "success, a cut ran"
+  | `Uncommitted_same -> "success, no cut ran"
+  | `Differs -> "DIFFERS"
 
 let cut_never_changes_success =
   Prop.test ~name:"cut never changes a successful result" ~print:print_gi
-    (gen_gi ~cuts:true) (fun (g, s) ->
-      cut_under_absorber ~under:false g
-      ||
-      match P.parse (G.compile g) s with
-      | Ok v -> (
-          match P.parse (G.compile (G.erase_cuts g)) s with
-          | Ok v' -> v = v'
-          | Error _ -> false
-          | exception P.Grammar_error _ -> false)
-      | Error _ -> true
-      | exception P.Grammar_error _ -> true)
+    ~collect:cut_class
+    Gen.(
+      map
+        (fun (g, s) -> (G.erase_absorbed_cuts g, s))
+        (G.gen_matching ~cuts:true))
+    (fun c -> cut_case c <> `Differs)
 
 (* e. stack safety *)
 
@@ -158,7 +172,7 @@ let big = 1_000_000
 
 (* Angstrom #221: [count] was not tail-recursive; see [count big a] below. *)
 let stack_safety =
-  Prop.test ~count:1 ~name:"stack safety on 10^6 items" Gen.unit (fun () ->
+  Prop.once ~name:"stack safety on 10^6 items" (fun () ->
       let a = P.char 'a' in
       let as_ = String.make big 'a' in
       let csv = String.concat "," (List.init big (fun _ -> "a")) in
@@ -189,7 +203,7 @@ let sep_end_by1_prop =
   Prop.test
     ~name:"sep_end_by1 matches one or more items and a trailing separator"
     ~print:String.escaped
-    Gen.(string_size ~gen:(oneof_list [ 'a'; 'a'; ','; 'x' ]) (int_bound 10))
+    Gen.(string_size ~gen:(oneof_list [ 'a'; 'a'; ','; 'x' ]) (Prop.bound 10))
     (fun s ->
       let p = P.sep_end_by1 ~sep:(P.char ',') (P.char 'a') in
       match (P.parse_prefix p s, sep_end_by1_model s) with
@@ -218,11 +232,47 @@ let depth_limit =
       | Error _ -> false)
 
 let depth_default =
-  Prop.test ~count:1 ~name:"depth: default limit is 5000" Gen.unit (fun () ->
+  Prop.once ~name:"depth: default limit is 5000" (fun () ->
       (match depth_result P.default_max_depth with Ok _ -> true | _ -> false)
       &&
       match depth_result (P.default_max_depth + 1) with
       | Error [ d ] -> P.Diagnostic.message d = too_deep 5000
+      | _ -> false)
+
+(* Entering a recursion point counts while it runs: shallow entries that
+   follow one another, including those of failed alternatives, must not add
+   up. [total] entries pass the limit, the nesting never does. *)
+type recursion = Fix | Force | Delay
+
+let enter_once api p =
+  match api with
+  | Fix -> P.fix (fun _ -> p)
+  | Force -> P.force (lazy p)
+  | Delay -> P.delay (fun () -> p)
+
+let show_recursion = function
+  | Fix -> "fix"
+  | Force -> "force"
+  | Delay -> "delay"
+
+let depth_restored =
+  Prop.test ~name:"depth: restored on exit; only nesting counts, not entries"
+    ~print:(fun (api, levels, items) ->
+      Printf.sprintf "%s, %d levels, %d items" (show_recursion api) levels items)
+    Gen.(
+      triple (oneof_list [ Fix; Force; Delay ]) (int_range 1 4) (int_range 1 8))
+    (fun (api, levels, items) ->
+      let rec nest k p = if k = 0 then p else nest (k - 1) (enter_once api p) in
+      (* The first alternative enters [levels] deep, then fails. *)
+      let item =
+        P.(nest levels (char 'a' *> char 'b') <|> nest levels (char 'a'))
+      in
+      let input = String.make items 'a' in
+      let run max_depth = P.parse ~max_depth (P.many item) input in
+      run levels = Ok (List.init items (fun _ -> 'a'))
+      &&
+      match run (levels - 1) with
+      | Error [ d ] -> P.Diagnostic.message d = too_deep (levels - 1)
       | _ -> false)
 
 (* g. spanned, validate, context *)
@@ -282,7 +332,10 @@ let context_prop =
       match P.parse_prefix p s with
       | Ok _ -> true
       | Error [ d ] ->
-          let e = (P.Diagnostic.span d).start in
+          (* where it fails follows from the input, not from the report *)
+          let e = if k < n && s.[k] = 'b' then k + 1 else k in
+          (P.Diagnostic.span d).start = e
+          &&
           let sp a =
             if e > a then P.Span.make ~start:a ~stop:e else P.Span.point a
           in
@@ -297,6 +350,145 @@ let context_prop =
                ctx frames
       | Error _ -> false)
 
+(* Alternatives that fail at the same place, each inside its own contexts:
+   the report keeps the first alternative's that has any. *)
+let tied_context =
+  let names = [ "p"; "q"; "r" ] in
+  Prop.test ~name:"alt/choice: tied failures keep the earlier non-empty context"
+    ~print:(fun (alts, use_choice) ->
+      Printf.sprintf "%s%s"
+        (String.concat " | " (List.map (String.concat ">") alts))
+        (if use_choice then " (choice)" else ""))
+    Gen.(
+      pair
+        (list_size (int_range 2 4) (list_size (int_bound 2) (oneof_list names)))
+        bool)
+    (fun (alts, use_choice) ->
+      (* Alternative [i] consumes 'x', then fails expecting its own letter. *)
+      let alt i frames =
+        List.fold_right
+          (fun name p -> P.context name p)
+          frames
+          P.(char 'x' *> char (Char.chr (Char.code 'a' + i)))
+      in
+      let parsers = List.mapi alt alts in
+      let p =
+        if use_choice then P.choice parsers
+        else List.fold_left P.( <|> ) (List.hd parsers) (List.tl parsers)
+      in
+      let first = List.find_opt (fun frames -> frames <> []) alts in
+      match P.parse p "xz" with
+      | Error [ d ] ->
+          P.Diagnostic.context d
+          = List.rev_map
+              (fun name -> (name, P.Span.make ~start:0 ~stop:1))
+              (Option.value first ~default:[])
+          && (P.Diagnostic.span d).start = 1
+      | _ -> false)
+
+(* [label] rewrites what happens at its start position and nothing deeper:
+   failures there, and the hints a success leaves there. *)
+let label_scope =
+  Prop.test ~name:"label: rewrites failures and hints at its start only"
+    ~print:(fun (hint, k, j) ->
+      Printf.sprintf "%s, %d letters, fails at %d"
+        (if hint then "hint" else "failure")
+        k j)
+    Gen.(triple bool (int_bound 3) (int_bound 3))
+    (fun (hint, k, j) ->
+      let lit c = P.Expected.Literal (String.make 1 c) in
+      let a_s = List.init k (fun _ -> P.(char 'a' >>| ignore)) in
+      let letters =
+        List.fold_left (fun acc p -> P.(acc *> p)) (P.return ()) a_s
+      in
+      if hint then
+        (* [label "L" (a^k [b])] then 'c': the hint of the optional 'b' sits at
+           position k *)
+        let p =
+          P.(label "L" (letters *> optional (char 'b')) *> char 'c' >>| ignore)
+        in
+        match P.parse p (String.make k 'a' ^ "x") with
+        | Error [ d ] ->
+            P.Diagnostic.expected d
+            = List.sort_uniq P.Expected.compare
+                [ (if k = 0 then P.Expected.Label "L" else lit 'b'); lit 'c' ]
+        | _ -> false
+      else
+        (* [label "L" (a^k b)] failing at position j <= k *)
+        let j = min j k in
+        let p = P.(label "L" (letters *> char 'b') >>| ignore) in
+        match P.parse p (String.make j 'a' ^ "x") with
+        | Error [ d ] ->
+            P.Diagnostic.expected d
+            = [
+                (if j = 0 then P.Expected.Label "L"
+                 else if j < k then lit 'a'
+                 else lit 'b');
+              ]
+            && (P.Diagnostic.span d).start = j
+        | _ -> false)
+
+(* Commitment inside [attempt] does not escape it, whether the body succeeds
+   or fails. *)
+let attempt_absorbs_commitment =
+  Prop.test ~name:"attempt: a cut inside does not commit what encloses it"
+    ~print:(fun (succeeds, input) -> Printf.sprintf "%b on %S" succeeds input)
+    Gen.(pair bool (oneof_list [ "ab"; "ac" ]))
+    (fun (succeeds, input) ->
+      let body =
+        P.(
+          char 'a' *> cut *> if succeeds then return () else char 'z' >>| ignore)
+      in
+      let p =
+        P.(
+          attempt body *> char 'b'
+          >>| ignore
+          <|> (char 'a' *> char 'c' >>| ignore))
+      in
+      Result.is_ok (P.parse p input)
+      = (input = "ac" || (succeeds && input = "ab")))
+
+(* Failures at the same place: a custom message beats expectations (the first
+   custom one if there are several), otherwise the expectations are united. *)
+let tied_failures =
+  Prop.test ~name:"alt/choice: tied failures keep the first custom message"
+    ~print:(fun (alts, use_choice) ->
+      String.concat " | "
+        (List.map (function Ok m -> m | Error c -> String.make 1 c) alts)
+      ^ if use_choice then " (choice)" else "")
+    Gen.(
+      pair
+        (list_size (int_range 2 4)
+           (oneof
+              [
+                map (fun m -> Ok m) (oneof_list [ "m1"; "m2"; "m3" ]);
+                map (fun c -> Error c) (oneof_list [ 'a'; 'b'; 'c' ]);
+              ]))
+        bool)
+    (fun (alts, use_choice) ->
+      let alt = function
+        | Ok m -> P.fail m
+        | Error c -> P.(char c >>| ignore)
+      in
+      let parsers = List.map (fun a -> P.(alt a >>| ignore)) alts in
+      let p =
+        if use_choice then P.choice parsers
+        else List.fold_left P.( <|> ) (List.hd parsers) (List.tl parsers)
+      in
+      match P.parse p "z" with
+      | Error [ d ] -> (
+          match List.find_map (function Ok m -> Some m | _ -> None) alts with
+          | Some m -> P.Diagnostic.message d = m
+          | None ->
+              P.Diagnostic.expected d
+              = List.sort_uniq P.Expected.compare
+                  (List.filter_map
+                     (function
+                       | Error c -> Some (P.Expected.Literal (String.make 1 c))
+                       | Ok _ -> None)
+                     alts))
+      | _ -> false)
+
 (* h. message phrasing *)
 
 let message p s =
@@ -309,7 +501,7 @@ let is_lower c = c >= 'a' && c <= 'z'
 
 let phrasing =
   let c = P.char and ( <|> ) = P.( <|> ) in
-  Prop.test ~count:1 ~name:"message phrasing" Gen.unit (fun () ->
+  Prop.once ~name:"message phrasing" (fun () ->
       List.for_all
         (fun (got, want) -> got = want)
         [
@@ -340,8 +532,7 @@ let phrasing =
       Result.is_error P.(parse (string "a" <|> string "ab" <* eof) "ab"))
 
 let codes =
-  Prop.test ~count:1 ~name:"codes reach diagnostics; count (-1) is rejected"
-    Gen.unit (fun () ->
+  Prop.once ~name:"codes reach diagnostics; count (-1) is rejected" (fun () ->
       let code p s =
         match P.parse p s with Error [ d ] -> P.Diagnostic.code d | _ -> None
       in
@@ -509,9 +700,14 @@ let () =
         sep_end_by1_prop;
         depth_limit;
         depth_default;
+        depth_restored;
         spanned_prop;
         validate_prop;
         context_prop;
+        tied_context;
+        tied_failures;
+        label_scope;
+        attempt_absorbs_commitment;
         phrasing;
         codes;
         fail_annotations;
