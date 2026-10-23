@@ -6,6 +6,7 @@ module type S = sig
   val space : unit t
   val lexeme : 'a t -> 'a t
   val symbol : string -> string t
+  val punct : string -> unit t
   val keyword : string -> string t
   val identifier : string t
 end
@@ -82,6 +83,7 @@ let make ?(line_comments = []) ?(block_comments = []) ?(nested_comments = false)
   in
   let lexeme p = p <* space in
   let symbol lit = lexeme (string lit) in
+  let punct lit = map ignore (symbol lit) in
   let keyword word =
     let n = String.length word in
     let items = [ Expected.Literal word ] in
@@ -108,6 +110,7 @@ let make ?(line_comments = []) ?(block_comments = []) ?(nested_comments = false)
     let space = space
     let lexeme = lexeme
     let symbol = symbol
+    let punct = punct
     let keyword = keyword
     let identifier = identifier
   end : S)

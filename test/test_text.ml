@@ -570,6 +570,9 @@ let space_prop p name =
       && (match run (L.symbol "+") ("+" ^ trivia ^ stop) with
         | V ("+", pos) -> pos = n + 1
         | _ -> false)
+      && List.for_all
+           (fun s -> run (L.punct "+") s = run P.(map ignore (L.symbol "+")) s)
+           [ "+" ^ trivia ^ stop; trivia ^ stop ]
       && expects ~pos:n [ P.Expected.Literal "x" ]
            (run P.(L.space *> char 'x') (trivia ^ "y")))
 

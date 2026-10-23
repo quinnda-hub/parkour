@@ -102,9 +102,9 @@ module L = (val Lexeme.make ~line_comments:[ "#" ] ())
 
 let assignment =
   let+ name = L.identifier
-  and+ _ = L.symbol "="
+  and+ () = L.punct "="
   and+ value = L.lexeme integer
-  and+ _ = L.symbol ";" in
+  and+ () = L.punct ";" in
   (name, value)
 
 let program = L.space *> many assignment
@@ -131,11 +131,13 @@ error: expected ';', found end of input
   | ^ expected ';'
 v}
 
-[L.symbol s] matches [s]; [L.keyword s] matches a whole word (so [keyword "if"]
-rejects [iffy]); [L.identifier] reads a name that is not in the [~reserved]
-list; [L.lexeme p] is any parser [p] followed by whitespace. {!Parkour.hidden}
-keeps a parser out of the [expected ...] lists, and is what makes the
-whitespace skipping invisible in messages.
+[L.symbol s] matches [s] and returns it; [L.punct s] is the same but returns
+[()], for punctuation whose text is not needed (hence [and+ () = ...] above).
+[L.keyword s] matches a whole word (so [keyword "if"] rejects [iffy]);
+[L.identifier] reads a name that is not in the [~reserved] list; [L.lexeme p] is
+any parser [p] followed by whitespace. {!Parkour.hidden} keeps a parser out of
+the [expected ...] lists, and is what makes the whitespace skipping invisible in
+messages.
 
 {1 Choice and commitment}
 
@@ -150,18 +152,18 @@ be explained away by another. In this language [let] is not reserved, so
 the one defined above):
 
 {[
-let semi = L.symbol ";"
+let semi = L.punct ";"
 
 let declaration =
   let+ _ = L.keyword "let"
   and+ name = L.identifier
-  and+ _ = L.symbol "="
+  and+ () = L.punct "="
   and+ n = L.lexeme integer
-  and+ _ = semi in
+  and+ () = semi in
   Printf.sprintf "declare %s = %d" name n
 
 let call =
-  let+ name = L.identifier and+ _ = semi in
+  let+ name = L.identifier and+ () = semi in
   "call " ^ name
 
 let statement = declaration <|> call
@@ -187,9 +189,9 @@ backtrack past it, and a failure is reported as is:
 let declaration =
   let+ _ = L.keyword "let" <* cut
   and+ name = L.identifier
-  and+ _ = L.symbol "="
+  and+ () = L.punct "="
   and+ n = L.lexeme integer
-  and+ _ = semi in
+  and+ () = semi in
   Printf.sprintf "declare %s = %d" name n
 
 let statement = declaration <|> call
@@ -390,7 +392,7 @@ let port =
     (L.lexeme natural)
 
 let setting =
-  let+ key = L.identifier and+ _ = L.symbol "=" <* cut and+ p = port in
+  let+ key = L.identifier and+ () = L.punct "=" <* cut and+ p = port in
   (key, p)
 
 let show_setting (k, p) = Printf.sprintf "%s = %d" k p
@@ -484,9 +486,9 @@ let value =
 
 let setting =
   let+ key = L.identifier
-  and+ _ = L.symbol "=" <* cut
+  and+ () = L.punct "=" <* cut
   and+ v = value
-  and+ _ = or_insert ";" (L.symbol ";") in
+  and+ () = or_insert () (L.punct ";") in
   (key, v)
 
 let sync = skip_past ~nested:(char '{', char '}') (char ';') *> L.space
@@ -562,7 +564,7 @@ let setting_with_warning =
       emit (Diagnostic.make ~severity:`Warning ~span "keys should be lowercase")
     else return ()
   in
-  let+ _ = L.symbol "=" and+ v = value in
+  let+ () = L.punct "=" and+ v = value in
   (key, v)
 
 let () =

@@ -730,6 +730,10 @@ module type TEXT = sig
       val symbol : string -> string t
       (** [symbol s] is {!string}[ s] followed by {!space}. *)
 
+      val punct : string -> unit t
+      (** [punct s] is [symbol s] returning [()], for punctuation and operators
+          whose text is not needed: [and+ () = punct "="]. *)
+
       val keyword : string -> string t
       (** [keyword s] matches [s] only if it is not followed by an identifier
           character, then skips {!space}. Otherwise fails at its start,
