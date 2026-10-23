@@ -1,0 +1,125 @@
+=== valid document ===
+ok: parsed
+=== valid empty containers ===
+ok: parsed
+=== trailing comma in an array ===
+error: expected value, found ']'
+ --> gallery.json:1:10
+  |
+1 | [1, 2, 3,]
+  |          ^ expected value
+  = while parsing array, from 1:1
+=== trailing comma in an object ===
+error: expected string, found '}'
+ --> gallery.json:1:17
+  |
+1 | {"a": 1, "b": 2,}
+  |                 ^ expected string
+  = while parsing object, from 1:1
+=== single-quoted string ===
+error: expected value, found '\''
+ --> gallery.json:1:10
+  |
+1 | {"name": 'parkour'}
+  |          ^ expected value
+  = while parsing object, from 1:1
+=== unquoted key ===
+error: expected string or '}', found "name"
+ --> gallery.json:1:2
+  |
+1 | {name: "parkour"}
+  | - opened here
+  |  ^^^^ expected string or '}'
+  = while parsing object, from 1:1
+=== NaN ===
+error: expected value, found "NaN"
+ --> gallery.json:1:5
+  |
+1 | [1, NaN]
+  |     ^^^ expected value
+  = while parsing array, from 1:1
+=== a // comment ===
+error: expected ',' or '}', found '/'
+ --> gallery.json:2:10
+  |
+1 | {
+  | - opened here
+2 |   "a": 1 // the answer
+  |          ^ expected ',' or '}'
+  = while parsing object, from 1:1
+=== missing comma between members ===
+error: expected ',' or '}', found '"'
+ --> gallery.json:3:3
+  |
+1 | {
+  | - opened here
+2 |   "a": 1
+3 |   "b": 2
+  |   ^ expected ',' or '}'
+  = while parsing object, from 1:1
+=== missing colon ===
+error: expected ':', found '1'
+ --> gallery.json:1:6
+  |
+1 | {"a" 1}
+  |      ^ expected ':'
+  = while parsing object, from 1:1
+=== unclosed [ spanning several lines ===
+error: expected ',' or ']', found end of input
+ --> gallery.json:5:1
+  |
+1 | [
+  | - opened here
+...
+5 |
+  | ^ expected ',' or ']'
+  = while parsing array, from 1:1
+=== unclosed { before more input ===
+error: expected ',' or '}', found '"'
+ --> gallery.json:3:3
+  |
+1 | {
+  | - opened here
+2 |   "a": [1, 2]
+3 |   "b": 3
+  |   ^ expected ',' or '}'
+  = while parsing object, from 1:1
+=== unterminated string ===
+error: unterminated string
+ --> gallery.json:1:10
+  |
+1 | {"name": "parkour}
+  |          ^^^^^^^^^
+  = while parsing object, from 1:1
+=== invalid escape ===
+error: invalid escape sequence
+ --> gallery.json:1:6
+  |
+1 | ["tab\q"]
+  |      ^^
+  = while parsing array, from 1:1
+=== number out of range ===
+error: number out of range
+ --> gallery.json:1:5
+  |
+1 | [1, 1e999]
+  |     ^^^^^
+  = while parsing array, from 1:1
+=== nesting deeper than the limit (max_depth 8) ===
+error: nesting too deep (more than 8 levels)
+ --> gallery.json:1:5
+  |
+1 | [[[[[[[[[[[[[[[[[[[[
+  |     ^
+=== empty input ===
+error: expected value, found end of input
+ --> gallery.json:1:1
+  |
+1 |
+  | ^ expected value
+=== trailing garbage after the value ===
+error: expected end of input, found '{'
+ --> gallery.json:1:10
+  |
+1 | {"a": 1} {"b": 2}
+  |          ^ expected end of input

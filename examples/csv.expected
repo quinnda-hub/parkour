@@ -1,0 +1,63 @@
+=== valid: commas, newlines and doubled quotes in quoted fields ===
+parsed: 2 rows (0 skipped)
+=== CRLF line endings and a byte order mark ===
+parsed: 2 rows (0 skipped)
+=== ragged rows ===
+error: expected 4 fields, found 3
+ --> gallery.csv:3:1
+  |
+1 | id,name,email,team
+  | ------------------ the header has 4 fields
+2 | 1,Ada,ada@example.com,core
+3 | 2,Grace,grace@example.com
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^
+error: expected 4 fields, found 2
+ --> gallery.csv:5:1
+  |
+1 | id,name,email,team
+  | ------------------ the header has 4 fields
+...
+5 | 4,Margaret
+  | ^^^^^^^^^^
+parsed: 2 rows (2 skipped)
+=== stray quote in an unquoted field ===
+error: unexpected quote in unquoted field
+ --> gallery.csv:3:6
+  |
+3 | 2,Gra"ce
+  |      ^
+  = note: to include a quote, wrap the whole field in quotes
+parsed: 2 rows (1 skipped)
+=== garbage after a closing quote ===
+error: unexpected 'x' after the closing quote
+ --> gallery.csv:2:8
+  |
+2 | 1,"Ada"x
+  |   ----- this field ends here
+  |        ^
+parsed: 1 row (1 skipped)
+=== unterminated quoted field ===
+error: unterminated string
+ --> gallery.csv:3:9
+  |
+3 | 2,Grace,"never closed
+  |         ^
+  = note: the quoted field runs to the end of the input; check for a missing closing quote
+parsed: 1 row (1 skipped)
+=== semicolon delimiter ===
+error: expected 3 fields, found 2
+ --> gallery.csv:3:1
+  |
+1 | id;name;note
+  | ------------ the header has 3 fields
+2 | 1;Ada;"a;b"
+3 | 2;Grace
+  | ^^^^^^^
+parsed: 1 row (1 skipped)
+=== empty input ===
+error: expected a header row, found end of input
+ --> gallery.csv:1:1
+  |
+1 |
+  | ^
+parsed: nothing

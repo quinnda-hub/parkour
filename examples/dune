@@ -1,3 +1,36 @@
+; Each showcase example prints a gallery of broken inputs with `--gallery`;
+; `dune test` diffs it against <name>.expected (accept with `dune promote`).
+
 (executables
- (names json calc config)
+ (names json calc config csv values)
  (libraries parkour))
+
+(rule
+ (with-stdout-to
+  json.output
+  (run %{exe:json.exe} --gallery)))
+
+(rule
+ (alias runtest)
+ (action
+  (diff json.expected json.output)))
+
+(rule
+ (with-stdout-to
+  csv.output
+  (run %{exe:csv.exe} --gallery)))
+
+(rule
+ (alias runtest)
+ (action
+  (diff csv.expected csv.output)))
+
+(rule
+ (with-stdout-to
+  values.output
+  (run %{exe:values.exe} --gallery)))
+
+(rule
+ (alias runtest)
+ (action
+  (diff values.expected values.output)))

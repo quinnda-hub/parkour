@@ -1,0 +1,98 @@
+=== semver: valid ===
+ok: 1.4.0 pre=rc.1 build=build.5
+=== semver: leading zero in the minor number ===
+error: leading zeros are not allowed
+ --> gallery.txt:1:3
+  |
+1 | 1.04.0
+  |   ^^
+=== semver: leading zero in a numeric prerelease identifier ===
+error: leading zeros are not allowed
+ --> gallery.txt:1:10
+  |
+1 | 1.4.0-rc.01
+  |          ^^
+=== semver: missing patch number ===
+error: expected '.', found end of input
+ --> gallery.txt:1:4
+  |
+1 | 1.4
+  |    ^ expected '.'
+=== semver: empty prerelease identifier ===
+error: expected identifier, found '.'
+ --> gallery.txt:1:10
+  |
+1 | 1.4.0-rc..1
+  |          ^ expected identifier
+=== semver: invalid character in the build metadata ===
+error: expected '.' or end of input, found "_5"
+ --> gallery.txt:1:12
+  |
+1 | 1.4.0+build_5
+  |            ^^ expected '.' or end of input
+=== date: valid (leap day) ===
+ok: 2024-02-29
+=== date: month out of range ===
+error: month must be between 01 and 12
+ --> gallery.txt:1:6
+  |
+1 | 2023-13-01
+  |      ^^
+=== date: day out of range for February ===
+error: day 29 is out of range for February 2023
+ --> gallery.txt:1:9
+  |
+1 | 2023-02-29
+  |         ^^
+=== date: day out of range for a 30-day month ===
+error: day 31 is out of range for April 2023
+ --> gallery.txt:1:9
+  |
+1 | 2023-04-31
+  |         ^^
+=== date: month with one digit ===
+error: month must have exactly 2 digits
+ --> gallery.txt:1:6
+  |
+1 | 2023-1-05
+  |      ^
+=== date: wrong separator ===
+error: expected '-', found '/'
+ --> gallery.txt:1:5
+  |
+1 | 2023/01/05
+  |     ^ expected '-'
+=== duration: valid ===
+ok: 189000 seconds
+=== duration: duplicate unit ===
+error: unit 'm' is given more than once
+ --> gallery.txt:1:6
+  |
+1 | 1h30m15m
+  |   --- first given here
+  |      ^^^ duplicate
+=== duration: units out of order ===
+error: unit 'h' must come before 'm'
+ --> gallery.txt:1:4
+  |
+1 | 30m1h
+  |    ^^
+  = note: write units from largest to smallest: d, h, m, s
+=== duration: zero amount ===
+error: value must be positive
+ --> gallery.txt:1:1
+  |
+1 | 0s
+  | ^
+=== duration: unit missing ===
+error: expected 'd', 'h', 'm', or 's', found end of input
+ --> gallery.txt:1:5
+  |
+1 | 1h30
+  |     ^ expected 'd', 'h', 'm', or 's'
+=== duration: unknown unit ===
+error: expected 'd', 'h', 'm', or 's', found 'w'
+ --> gallery.txt:1:2
+  |
+1 | 2w
+  |  ^ expected 'd', 'h', 'm', or 's'
