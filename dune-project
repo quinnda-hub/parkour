@@ -1,5 +1,7 @@
 (lang dune 3.0)
 
+(using menhir 2.1)
+
 (name parkour)
 
 (generate_opam_files true)

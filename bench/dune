@@ -1,0 +1,21 @@
+; Benchmarks: parkour against Angstrom, MParser, Yojson and ocamllex+menhir.
+; Not part of the package and not built by default (the bench-only libraries
+; live in the project switch, not in the opam dependencies):
+;
+;   dune exec --profile release bench/main.exe -- [--quick] [--errors]
+;
+; Run `bench/fetch.sh` once to download the JSON fixtures.
+
+(rule
+ (alias default)
+ (action (progn)))
+
+(executable
+ (name main)
+ (optional)
+ (libraries parkour angstrom mparser yojson bechamel))
+
+(ocamllex json_lexer expr_lexer)
+
+(menhir
+ (modules json_parser expr_parser))
