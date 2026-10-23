@@ -1,0 +1,57 @@
+; The documentation's examples are tested: each page's {[ ]} blocks are
+; compiled in order as one program, whose output must equal the page's {v v}
+; blocks. A mismatch is fixed in the page, not by promotion (plain diff, not
+; dune's diff action). To add a page: copy the rules below for its name.
+
+(executable
+ (name extract)
+ (modules extract))
+
+; Snippets may shadow and leave values unused, as prose examples do.
+
+(executables
+ (names tutorial index)
+ (modules tutorial index)
+ (flags
+  (:standard -w -a))
+ (libraries parkour))
+
+(rule
+ (with-stdout-to
+  tutorial.ml
+  (run %{exe:extract.exe} code %{dep:../../doc/tutorial.mld})))
+
+(rule
+ (with-stdout-to
+  tutorial.expected
+  (run %{exe:extract.exe} output %{dep:../../doc/tutorial.mld})))
+
+(rule
+ (with-stdout-to
+  tutorial.output
+  (run %{exe:tutorial.exe})))
+
+(rule
+ (alias runtest)
+ (action
+  (run diff -u %{dep:tutorial.expected} %{dep:tutorial.output})))
+
+(rule
+ (with-stdout-to
+  index.ml
+  (run %{exe:extract.exe} code %{dep:../../doc/index.mld})))
+
+(rule
+ (with-stdout-to
+  index.expected
+  (run %{exe:extract.exe} output %{dep:../../doc/index.mld})))
+
+(rule
+ (with-stdout-to
+  index.output
+  (run %{exe:index.exe})))
+
+(rule
+ (alias runtest)
+ (action
+  (run diff -u %{dep:index.expected} %{dep:index.output})))
