@@ -1,0 +1,9 @@
+; JSONTestSuite corpus check for the strict JSON grammar in examples/.
+
+(copy_files ../../examples/json_parser.ml)
+
+(test
+ (name test_json_suite)
+ (libraries parkour)
+ (deps
+  (glob_files corpus/*.json)))

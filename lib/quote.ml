@@ -12,12 +12,6 @@ let is_ascii_word c =
 (* Length of the word character at [i], or 0 if it is not one. *)
 let word_len s i = if is_ascii_word s.[i] then 1 else multibyte_len s i
 
-(* Bidirectional controls, which could reorder the displayed message. *)
-let is_bidi c =
-  c = 0x061C || c = 0x200E || c = 0x200F
-  || (0x202A <= c && c <= 0x202E)
-  || (0x2066 <= c && c <= 0x2069)
-
 let literal s =
   let n = String.length s in
   let single = n = 1 || (n > 1 && multibyte_len s 0 = n) in
@@ -30,7 +24,8 @@ let literal s =
     let m = multibyte_len s !i in
     if m > 0 then begin
       let code = Decode.code (Decode.decode s !i) in
-      if is_bidi code then Buffer.add_string b (Printf.sprintf "\\u{%04X}" code)
+      if Decode.is_bidi code then
+        Buffer.add_string b (Printf.sprintf "\\u{%04X}" code)
       else Buffer.add_substring b s !i m;
       i := !i + m
     end

@@ -12,15 +12,47 @@ let no_progress pos =
 
 (* [quoted] is a loop over the raw text; only escapes call a parser. [chunk]
    is the start of the raw text not yet copied to [buf]. *)
-let quoted ?escape ?(doubled = false) ?(multiline = false) quote =
+let quoted ?escape ?(doubled = false) ?(multiline = false) ?(utf8 = false)
+    ?forbid quote =
   let items = [ Expected.Label "string" ] in
   let backslash = escape <> None in
+  let strict = utf8 || forbid <> None in
   fun st start ->
     let s = st.input in
     let unterminated i =
       custom_fail i ~start
         ~stop:(if multiline then start + 1 else i)
         "unterminated string"
+    in
+    (* A raw byte at [i] that [utf8] or [forbid] rejects: the failure; else the
+       length of the raw character to copy. *)
+    let raw i =
+      let d = Decode.decode s i in
+      let n = Decode.length d in
+      if utf8 && Decode.code d < 0 then
+        Error (custom_fail i ~start:i ~stop:(i + 1) Text_utf8.invalid_message)
+      else
+        let n = if Decode.code d < 0 then 1 else n in
+        let rec scan k =
+          if k >= n then Ok n
+          else if (Option.get forbid) (String.unsafe_get s (i + k)) then
+            Error ()
+          else scan (k + 1)
+        in
+        match if forbid = None then Ok n else scan 0 with
+        | Ok n -> Ok n
+        | Error () ->
+            (* Name just this character, not the word around it; a CRLF is one
+               newline, as in {!Quote.found}. *)
+            let n =
+              if n = 1 && s.[i] = '\r' && i + 1 < st.len && s.[i + 1] = '\n'
+              then 2
+              else n
+            in
+            let name, _ = Quote.found (String.sub s i n) 0 in
+            Error
+              (custom_fail i ~start:i ~stop:(i + n)
+                 (Printf.sprintf "unexpected %s in string" name))
     in
     let rec go buf chunk i =
       if i >= st.len then unterminated i
@@ -63,6 +95,8 @@ let quoted ?escape ?(doubled = false) ?(multiline = false) quote =
                   "invalid escape sequence"
             | Fail r -> Fail { r with cut = false }
           end
+        else if strict then
+          match raw i with Ok n -> go buf chunk (i + n) | Error f -> f
         else go buf chunk (i + 1)
     in
     if start < st.len && String.unsafe_get s start = quote then

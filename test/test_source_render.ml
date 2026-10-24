@@ -273,7 +273,18 @@ let caret_alignment =
 (* The renderer's tables, written out again here: control and bidirectional
    characters are replaced, zero-width and wide characters change the columns.
    Every interval is probed at its ends and one scalar beyond each. *)
-let odd_ranges = [ (0x80, 0x9F); (0x202A, 0x202E); (0x2066, 0x2069) ]
+let c1_ranges = [ (0x80, 0x9F) ]
+
+(* The Unicode Bidi_Control property (PropList.txt), written from the standard
+   and deliberately independent of lib/: U+061C, U+200E-200F, U+202A-202E,
+   U+2066-2069. *)
+let bidi_controls =
+  [ 0x061C; 0x200E; 0x200F ]
+  @ [ 0x202A; 0x202B; 0x202C; 0x202D; 0x202E ]
+  @ [ 0x2066; 0x2067; 0x2068; 0x2069 ]
+
+let bidi_ranges = List.map (fun c -> (c, c)) bidi_controls
+let odd_ranges = c1_ranges @ bidi_ranges
 
 let zero_ranges =
   [
@@ -283,6 +294,9 @@ let zero_ranges =
     (0x20D0, 0x20FF);
     (0xFE20, 0xFE2F);
     (0x200B, 0x200F);
+    (* U+200E and U+200F are bidirectional controls, so shown as U+FFFD (see
+       [odd_ranges], which takes precedence); the zero-width rule never reaches
+       them. *)
     (0xFE00, 0xFE0F);
     (0xE0100, 0xE01EF);
   ]

@@ -16,3 +16,10 @@ let decode s i =
       (Uchar.to_int (Uchar.utf_decode_uchar d) lsl 8)
       lor Uchar.utf_decode_length d
     else 0xff
+
+(* The Unicode Bidi_Control property: characters that could reorder displayed
+   text. Quoted text escapes them and source excerpts replace them. *)
+let is_bidi c =
+  c = 0x061C || c = 0x200E || c = 0x200F
+  || (0x202A <= c && c <= 0x202E)
+  || (0x2066 <= c && c <= 0x2069)

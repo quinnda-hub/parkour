@@ -3,8 +3,8 @@
 Parkour is a parser-combinator library for human-authored text: configuration
 files, DSLs and small languages. Its aims are error messages that tell the user
 what is wrong and where, an API that reads well, opt-in error recovery, and
-robustness against hostile input. It depends on nothing beyond the OCaml
-standard library.
+stack safety on long and deeply nested input. It depends on nothing beyond the
+OCaml standard library.
 
 {1 An example}
 
@@ -70,7 +70,11 @@ context, labels, notes), so editors and other tools can use them directly.
 - {b Robustness.} Repetitions are loops, so long inputs do not use the stack,
   and nesting is limited ([max_depth]): deeply nested input is a
   [nesting too deep] error. Where OCaml can raise [Stack_overflow], the
-  runners also turn that into the same kind of error.
+  runners also turn that into the same kind of error. Running time is not
+  bounded: [<|>] backtracks by default, so an ambiguous grammar can take
+  exponential time on short input. Commit with {!Parkour.cut} once an
+  alternative is certain and factor out shared prefixes, especially for
+  untrusted input.
 
 {1 Where to go next}
 

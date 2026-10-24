@@ -518,6 +518,162 @@ let quoted_options =
         in
         custom "unterminated string" 0 stop (run p src))
 
+(* Raw-byte restrictions: [forbid] and [utf8] see raw bytes only. *)
+
+type piece = Raw of string | Esc of string | Dq
+
+let piece_text = function Raw s | Esc s -> s | Dq -> "\"\""
+
+(* How a raw character is named in "unexpected W in string", written out here
+   (a CR before an LF is named with it, below). *)
+let char_name = function
+  | "\t" -> "tab"
+  | "\n" -> "newline"
+  | "\r" -> "carriage return"
+  | " " -> "space"
+  | "a" -> "'a'"
+  | "\x01" -> "'\\x01'"
+  | "\xff" -> "'\\xff'"
+  | "\xc3\xa9" -> "'\xc3\xa9'"
+  | "\xe2\x82\xac" -> "'\xe2\x82\xac'"
+  | _ -> assert false
+
+let quoted_forbid =
+  let raw =
+    [ "a"; " "; "\t"; "\n"; "\r"; "\x01"; "\xc3\xa9"; "\xe2\x82\xac"; "\xff" ]
+  in
+  let pool = [ 'a'; ' '; '\t'; '\n'; '\r'; '\x01'; '\xa9'; '\x82'; '\xff' ] in
+  Prop.test
+    ~name:
+      "quoted ~forbid ~utf8: fails at the first bad raw character, naming and \
+       underlining it whole; escapes and doubled quotes are exempt; otherwise \
+       the result is unchanged"
+    ~print:(fun (m, d, u, f, ps) ->
+      Printf.sprintf "multiline=%b doubled=%b utf8=%b forbid=%S %S" m d u
+        (String.concat "" (List.map (String.make 1) f))
+        (String.concat "" (List.map piece_text ps)))
+    Gen.(
+      let* d = bool in
+      let* m = bool and* u = bool in
+      let* f = list_size (int_range 0 3) (oneof_list pool) in
+      let+ ps =
+        list_size (Prop.range 0 8)
+          (oneof
+             ([
+                map (fun s -> Raw s) (oneof_list raw);
+                map
+                  (fun s -> Esc s)
+                  (oneof_list [ "\\t"; "\\u0001"; "\\n"; "\\u00e9" ]);
+              ]
+             @ if d then [ return Dq ] else []))
+      in
+      (m, d, u, f, ps))
+    (fun (multiline, doubled, utf8, f, ps) ->
+      let forbid c = List.mem c f in
+      let text = "\"" ^ String.concat "" (List.map piece_text ps) ^ "\"" in
+      let p =
+        P.quoted ~escape:P.json_escape ~multiline ~doubled ~utf8 ~forbid '"'
+      in
+      let plain = P.quoted ~escape:P.json_escape ~multiline ~doubled '"' in
+      let rec expect pos = function
+        | [] -> None
+        | ((Esc s | Raw s) as pc) :: rest -> (
+            let len = String.length s in
+            match pc with
+            | Esc _ -> expect (pos + len) rest
+            | _ when (s = "\n" || s = "\r") && not multiline ->
+                Some (custom "unterminated string" 0 pos)
+            | _ when utf8 && s = "\xff" ->
+                Some (custom "invalid UTF-8" pos (pos + 1))
+            | _ when String.exists forbid s ->
+                let crlf = s = "\r" && rest <> [] && List.hd rest = Raw "\n" in
+                let name = if crlf then "newline" else char_name s in
+                Some
+                  (custom
+                     (Printf.sprintf "unexpected %s in string" name)
+                     pos
+                     (pos + if crlf then 2 else len))
+            | _ -> expect (pos + len) rest)
+        | Dq :: rest -> expect (pos + 2) rest
+      in
+      match expect 1 ps with
+      | Some check -> check (run p text)
+      | None -> run p text = run plain text)
+
+(* A reference UTF-8 decoder, independent of the library's: the length of the
+   well-formed scalar at [i], or 0. *)
+let ref_utf8_len s i =
+  let n = String.length s in
+  let b k = if i + k < n then Char.code s.[i + k] else -1 in
+  let cont k = b k land 0xC0 = 0x80 in
+  let in_ k lo hi = b k >= lo && b k <= hi in
+  let c = b 0 in
+  if c < 0x80 then 1
+  else if c >= 0xC2 && c <= 0xDF then if cont 1 then 2 else 0
+  else if c >= 0xE0 && c <= 0xEF then
+    let ok1 =
+      if c = 0xE0 then in_ 1 0xA0 0xBF
+      else if c = 0xED then in_ 1 0x80 0x9F
+      else cont 1
+    in
+    if ok1 && cont 2 then 3 else 0
+  else if c >= 0xF0 && c <= 0xF4 then
+    let ok1 =
+      if c = 0xF0 then in_ 1 0x90 0xBF
+      else if c = 0xF4 then in_ 1 0x80 0x8F
+      else cont 1
+    in
+    if ok1 && cont 2 && cont 3 then 4 else 0
+  else 0
+
+let quoted_utf8 =
+  let odd =
+    Gen.oneof_list
+      (List.map Char.chr
+         [
+           0x61;
+           0x7f;
+           0x80;
+           0xbf;
+           0xc0;
+           0xc2;
+           0xdf;
+           0xe0;
+           0xa0;
+           0xed;
+           0x9f;
+           0xef;
+           0xf0;
+           0x90;
+           0xf4;
+           0x8f;
+           0xf5;
+           0xff;
+         ])
+  in
+  let strip s = strip "\"\\\n\r" s in
+  Prop.test
+    ~name:
+      "quoted ~utf8: accepts exactly well-formed raw bytes, failing at the \
+       first ill-formed byte"
+    ~print:pp_bytes
+    Gen.(
+      map
+        (fun l -> strip (String.concat "" l))
+        (list_size (Prop.range 0 6)
+           (oneof [ map (fun c -> String.make 1 c) odd; map utf8 gen_scalar ])))
+    (fun body ->
+      let text = "\"" ^ body ^ "\"" in
+      let rec first_bad i =
+        if i >= String.length body then None
+        else
+          match ref_utf8_len body i with 0 -> Some i | n -> first_bad (i + n)
+      in
+      let r = run (P.quoted ~utf8:true '"') text in
+      match first_bad 0 with
+      | None -> r = V (body, String.length text)
+      | Some i -> custom "invalid UTF-8" (i + 1) (i + 2) r)
+
 (* Lexeme *)
 
 type policy = { op : string; cl : string; line : string; nested : bool }
@@ -830,6 +986,8 @@ let () =
         string_bad_second_surrogate;
         quoted_without_escape;
         quoted_options;
+        quoted_forbid;
+        quoted_utf8;
         space_prop flat "flat";
         space_prop nesting "nested";
         space_prop lua "line opener prefixes block opener";

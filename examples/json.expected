@@ -97,6 +97,34 @@ error: invalid escape sequence
 1 | ["tab\q"]
   |      ^^
   = while parsing array, from 1:1
+=== leading zero in a number ===
+error: leading zero in number
+ --> gallery.json:1:5
+  |
+1 | [1, 01]
+  |     ^^
+  = while parsing array, from 1:1
+=== raw tab inside a string ===
+error: unexpected tab in string
+ --> gallery.json:1:4
+  |
+1 | ["a b"]
+  |    ^
+  = while parsing array, from 1:1
+=== invalid UTF-8 inside a string ===
+error: invalid UTF-8
+ --> gallery.json:1:4
+  |
+1 | ["a�b"]
+  |    ^
+  = while parsing array, from 1:1
+=== form feed between tokens ===
+error: expected value, found '\x0c'
+ --> gallery.json:1:4
+  |
+1 | [1,␌2]
+  |    ^ expected value
+  = while parsing array, from 1:1
 === number out of range ===
 error: number out of range
  --> gallery.json:1:5

@@ -43,10 +43,7 @@ let utf8 code =
   Buffer.contents b
 
 (* Characters shown as U+FFFD: C1 controls and bidirectional controls. *)
-let is_odd c =
-  (0x80 <= c && c <= 0x9f)
-  || (0x202A <= c && c <= 0x202E)
-  || (0x2066 <= c && c <= 0x2069)
+let is_odd c = (0x80 <= c && c <= 0x9f) || Decode.is_bidi c
 
 (* Calls [f byte len code col width] for each character of text[start, stop),
    where [col] is its display column relative to [start]. *)
