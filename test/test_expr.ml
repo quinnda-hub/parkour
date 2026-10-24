@@ -139,7 +139,7 @@ let run p s =
   | Error [] -> failwith "no diagnostic"
 
 (* An independent reference: a recursive Pratt parser over the same grammar
-   (PLAN.md §3.7 binding powers). Where the library's parsing stops early
+   (binding powers as in the engine's [expression]). Where the library's parsing stops early
    (an operator whose operand fails, or a failed parenthesised term inside
    an operand) the flat operator sequence is simply cut there, which the
    reference does by retrying with a lower input limit. *)

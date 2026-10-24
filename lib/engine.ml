@@ -1,5 +1,6 @@
-(* The parsing engine, generic over its input. See PLAN.md §3 for the
-   semantics this implements; the comments here only explain the mechanics. *)
+(* The parsing engine, generic over its input. The semantics it implements
+   are documented in parkour_intf.ml; the comments here only explain the
+   mechanics. *)
 
 open Parkour_intf
 
@@ -828,7 +829,7 @@ module Make (I : INPUT) = struct
   let peek st pos =
     pass (if pos < st.len then Some (I.get st.input pos) else None) pos
 
-  (* Operators and grouping (PLAN.md §3.7). Parsing is plain combinators, so
+  (* Operators and grouping. Parsing is plain combinators, so
      commitment, hints and merging are inherited; the parsed sequence is then
      grouped by an iterative shunting-yard pass. *)
 
@@ -916,7 +917,11 @@ module Make (I : INPUT) = struct
               "Parkour.expression: a level mixes infix associativities"
         | _ -> ())
       levels;
-    (* Strength [i = n - k] for the k-th level; see PLAN.md §3.7. *)
+    (* The k-th level (0-based, tightest first) has strength [i = n - k].
+       Binding powers are multiples of 6 so that, within one strength, postfix
+       ([6i + 4]) binds tighter than prefix ([6i + 2]), which binds tighter
+       than infix ([6i]); a right-associative operator's right operand binds
+       at [6i - 1] so that it absorbs the same operator again. *)
     let flat =
       List.concat
         (List.mapi
@@ -982,7 +987,7 @@ module Make (I : INPUT) = struct
     in
     bind p (fun a0 -> map (fold_right a0) (fold_loop "chainr1" cons [] step))
 
-  (* Error recovery (PLAN.md §5) *)
+  (* Error recovery *)
 
   type catch = [ `Committed | `Any ]
 

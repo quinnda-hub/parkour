@@ -6,11 +6,14 @@
 
 (generate_opam_files true)
 
+(source
+ (github quinnda-hub/parkour))
+
 (license MIT)
 
-(authors "Quinn <quinn@quinnanhorn.com>")
+(authors "Quinn Anhorn <quinn@quinnanhorn.com>")
 
-(maintainers "Quinn <quinn@quinnanhorn.com>")
+(maintainers "Quinn Anhorn <quinn@quinnanhorn.com>")
 
 (package
  (name parkour)
