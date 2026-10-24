@@ -2,6 +2,7 @@ _build/
 _opam/
 *.install
 *.md
+!README.md
 .claude/
 .merlin
 *.swp

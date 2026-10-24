@@ -133,6 +133,9 @@ let () =
   let odd2 = "a\xc2\x85b\xe2\x80\xaeZ" in
   diag_case "C1 control and U+202E shown as U+FFFD" odd2
     (Diagnostic.make ~span:(at odd2 ~len:3 "\xe2\x80\xaeZ") "bad text");
+  let odd3 = "ab\xe2\x80\x8fc" in
+  diag_case "U+200F (right-to-left mark) shown as U+FFFD" odd3
+    (Diagnostic.make ~span:(at odd3 ~len:3 "\xe2\x80\x8fc") "bad text");
   let frames n =
     List.init n (fun i ->
         (Printf.sprintf "level %d" (i + 1), Span.make ~start:0 ~stop:i))
@@ -195,6 +198,12 @@ let () =
   case "invalid escape sequence" string_literal "\"tab\\q here\"";
   case "invalid unicode escape (lone surrogate)" string_literal
     "\"emoji \\ud83d here\"";
+  let strict =
+    quoted ~escape:json_escape ~utf8:true ~forbid:(fun c -> c < ' ')
+  in
+  case "string: forbidden raw tab" (strict '"') "\"a\tb\"";
+  case "string: forbidden raw control character" (strict '"') "\"a\x01b\"";
+  case "string: invalid UTF-8" (strict '"') "\"caf\xe9 au lait\"";
   case "invalid unicode escape (short)" string_literal "\"\\u12G4\"";
   case "unterminated comment"
     (L.symbol "x" *> L.symbol "=" *> L.lexeme integer)

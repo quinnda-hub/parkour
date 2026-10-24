@@ -1,3 +1,21 @@
+0.1.1 (2026-10-24)
+------------------
+
+- quoted takes ?utf8 and ?forbid to reject invalid UTF-8 ("invalid UTF-8")
+  and chosen raw bytes ("unexpected tab in string", ...) inside a string;
+  escapes are exempt. string_literal is unchanged; its doc gives the strict
+  JSON form.
+- Source excerpts show every bidirectional control (the Unicode
+  Bidi_Control property, now including U+061C, U+200E and U+200F) as U+FFFD,
+  as quoted text already escaped them.
+- The JSON example is a strict RFC 8259 parser (JSON whitespace only, no
+  leading zeros, strict strings), checked against JSONTestSuite.
+- Docs: the robustness claim now says what is guaranteed (stack safety and a
+  nesting limit, not bounded running time); the tutorial has a section of
+  recommended patterns, including parse_partial for warnings.
+- opam metadata: x-maintenance-intent is (latest). The README is now
+  README.md (Markdown).
+
 0.1.0 (2026-10-23)
 ------------------
 

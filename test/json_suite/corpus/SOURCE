@@ -1,0 +1,4 @@
+JSONTestSuite test_parsing files (y_*, n_*, i_*), by Nicolas Seriot, MIT license (see LICENSE).
+Upstream: https://github.com/nst/JSONTestSuite
+Commit: 1ef36fa01286573e846ac449e8683f8833c5b26a (2024-11-22)
+The files are data only, copied unchanged.

@@ -1,70 +1,11 @@
-(* A JSON parser written with Parkour.
+(* Command-line front end for the JSON grammar in json_parser.ml.
 
    Run it on a file:          dune exec examples/json.exe -- data.json
    Or on built-in samples:    dune exec examples/json.exe
-   Print the error gallery:   dune exec examples/json.exe -- --gallery
-
-   It shows the main techniques: mutually recursive parsers with
-   [let rec ... = lazy] and [force], [hidden] whitespace, [cut] after an
-   opening delimiter so errors inside it are not retried as something else,
-   [between] so an unclosed bracket points back to where it was opened, and
-   [context] for "while parsing ..." information. Strings and numbers come from
-   the library: [string_literal] handles every JSON escape, including \u escapes
-   and surrogate pairs, and [number] reports out-of-range values. *)
+   Print the error gallery:   dune exec examples/json.exe -- --gallery *)
 
 open Parkour
-
-type json =
-  | Null
-  | Bool of bool
-  | Number of float
-  | String of string
-  | Array of json list
-  | Object of (string * json) list
-
-(* Every token eats the whitespace after it, so the grammar never mentions
-   whitespace again; [whitespace] is [hidden], so it never shows up in
-   "expected ..." lists either. *)
-let ws = whitespace
-let lexeme p = p <* ws
-let sym c = lexeme (char c)
-let str = lexeme string_literal
-let num = lexeme number
-
-let rec value =
-  lazy
-    (* [label] collapses the seven ways a value can start into one word. *)
-    (choice ~label:"value"
-       [
-         lexeme (string "null") *> return Null;
-         lexeme (string "true") *> return (Bool true);
-         lexeme (string "false") *> return (Bool false);
-         (num >>| fun n -> Number n);
-         (str >>| fun s -> String s);
-         force array;
-         force obj;
-       ])
-
-(* [cut] right after the opening bracket: once we see [ or {, nothing else can
-   be meant, so errors inside are reported as they are. [between] adds the
-   "opened here" label when the closing bracket is missing. *)
-and array =
-  lazy
-    (context "array"
-       ( between (sym '[') (sym ']') (cut *> sep_by ~sep:(sym ',') (force value))
-       >>| fun items -> Array items ))
-
-and obj =
-  lazy
-    (let member =
-       let+ key = str <* sym ':' and+ v = force value in
-       (key, v)
-     in
-     context "object"
-       ( between (sym '{') (sym '}') (cut *> sep_by ~sep:(sym ',') member)
-       >>| fun members -> Object members ))
-
-let json = ws *> force value
+open Json_parser
 
 (* Diagnostics are plain data; [Diagnostic.render] turns them into a report
    with a source excerpt. *)
@@ -109,6 +50,10 @@ let gallery =
     ("unclosed { before more input", "{\n  \"a\": [1, 2]\n  \"b\": 3\n", None);
     ("unterminated string", {|{"name": "parkour}|}, None);
     ("invalid escape", {|["tab\q"]|}, None);
+    ("leading zero in a number", {|[1, 01]|}, None);
+    ("raw tab inside a string", "[\"a\tb\"]", None);
+    ("invalid UTF-8 inside a string", "[\"a\xffb\"]", None);
+    ("form feed between tokens", "[1,\x0c2]", None);
     ("number out of range", {|[1, 1e999]|}, None);
     ("nesting deeper than the limit (max_depth 8)", String.make 20 '[', Some 8);
     ("empty input", "", None);

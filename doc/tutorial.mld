@@ -700,6 +700,59 @@ v}
 [examples/mini.ml] and [examples/mini_tokens.ml] parse the same small language
 both ways and print the same errors.
 
+{1 Recommended patterns}
+
+The pieces above interact (commitment, backtracking, recovery, hidden
+whitespace, furthest-error hints), so here are the habits that keep them
+predictable.
+
+- {b Tokens eat their trailing whitespace.} Build tokens with
+  {!Parkour.Lexeme.make} (its [lexeme] wraps any token parser) and skip the
+  leading space once, at the start of the input. Whitespace and comments are
+  {!Parkour.trivia}, which keeps them out of [expected ...] lists and lets
+  {!Parkour.or_insert} report a missing token right after the previous one.
+  Write your own whitespace parsers with [trivia], not by hand in each rule.
+- {b Cut right after the token that decides.} Put {!Parkour.cut} after the
+  keyword or opening bracket that identifies a construct. From there an error is
+  reported as it is, instead of being retried by the other alternatives and
+  replaced by a vaguer one. Without a cut an alternative backs out even after
+  consuming input, so {!Parkour.attempt} is only needed when an alternative
+  contains a cut (often inside a parser you reuse) yet must still give way to
+  the next one: commitment inside [attempt] does not escape it, so an error
+  there is retried, and may be replaced, like any uncommitted one.
+- {b Factor out shared prefixes.} [a *> b <|> a *> c] parses [a] twice and,
+  when both fail, reports a merged error; [a *> (b <|> c)] parses it once and
+  fails where the choice is. This is also a running-time matter: [<|>]
+  backtracks by default and nothing bounds the time an ambiguous grammar takes,
+  so factor prefixes and commit with [cut], especially for untrusted input.
+- {b Recover per statement, at a synchronisation point.} Wrap each statement or
+  declaration (cut after its leading token) in {!Parkour.recover} with a [sync]
+  such as {!Parkour.skip_past} its terminator (with [~nested] for blocks), and
+  use one [recover] at each nesting level. Use {!Parkour.or_insert} for a
+  missing terminator instead of skipping to the next one. See
+  the Error recovery section above.
+- {b Use [parse_partial] if you emit warnings or recover.} {!Parkour.parse}
+  drops warnings recorded with {!Parkour.emit} when it returns [Ok], and
+  returns [Error] as soon as any error was recorded, even a recovered one.
+  {!Parkour.parse_partial} returns the value and every diagnostic. With the
+  warning example above:
+
+{[
+let () =
+  let input = "Port = 80" in
+  (match parse setting_with_warning input with
+   | Ok _ -> print_endline "parse: Ok, warnings dropped"
+   | Error _ -> print_endline "parse: Error");
+  match parse_partial setting_with_warning input with
+  | Some _, ds -> Printf.printf "parse_partial: %d diagnostic(s)\n" (List.length ds)
+  | None, _ -> print_endline "parse_partial: no value"
+]}
+
+{v
+parse: Ok, warnings dropped
+parse_partial: 1 diagnostic(s)
+v}
+
 {1 Performance notes}
 
 The defaults are fast enough for configuration files and small languages. A few

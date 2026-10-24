@@ -762,10 +762,17 @@ module type TEXT = sig
   (** {1 Strings} *)
 
   val quoted :
-    ?escape:string t -> ?doubled:bool -> ?multiline:bool -> char -> string t
+    ?escape:string t ->
+    ?doubled:bool ->
+    ?multiline:bool ->
+    ?utf8:bool ->
+    ?forbid:(char -> bool) ->
+    char ->
+    string t
   (** [quoted ~escape q] is the text between two [q] characters on one line,
       with the quotes removed. Expects [string] at the opening quote. Raw bytes
-      (including invalid UTF-8) are copied as they are.
+      (including control characters and invalid UTF-8) are copied as they are,
+      unless [utf8] or [forbid] says otherwise.
 
       With [escape], a backslash starts an escape sequence: [escape] is run
       starting {e at the backslash} and its result replaces the sequence. If it
@@ -792,7 +799,23 @@ module type TEXT = sig
       newlines are part of the string instead, and only the end of input is
       unterminated; the error is reported at the end of input but underlines
       just the opening quote, since the rest of the text is probably not meant
-      to be a string. Never commits, and leaves no hint. *)
+      to be a string.
+
+      [utf8] and [forbid] restrict the {e raw} bytes copied into the result;
+      they never apply to the quotes, a doubled quote pair, or an escape
+      sequence (what [escape] consumes or returns). With [utf8] (default
+      [false]) the raw bytes must be well-formed UTF-8: the first ill-formed
+      byte fails with [invalid UTF-8], underlining that byte. [forbid c] is
+      tested on every raw byte; a byte for which it returns [true] fails with
+      [unexpected W in string], where [W] names the character as in other
+      messages ([tab], [newline], ['\x01'], ...) and is underlined. A multi-byte
+      character is named and underlined whole, and fails at its first byte.
+      Newlines are unchanged: without [multiline] a raw newline is
+      [unterminated string] and [forbid] is not asked about it; with [multiline]
+      it is a raw byte like any other, so [forbid] applies. An escape that
+      produces a forbidden character is still accepted. These failures, like
+      [unterminated string], never commit and leave no hint. Without either
+      option there is no extra cost. *)
 
   val json_escape : string t
   (** A JSON escape sequence starting at its backslash: a backslash followed by
@@ -804,7 +827,9 @@ module type TEXT = sig
       escape (for a high surrogate followed by another [\u] escape, both). *)
 
   val string_literal : string t
-  (** [quoted ~escape:json_escape '"']: a JSON-style string literal. *)
+  (** [quoted ~escape:json_escape '"']: a JSON-style string literal. It accepts
+      raw control characters and invalid UTF-8; for strict JSON strings use
+      [quoted ~escape:json_escape ~utf8:true ~forbid:(fun c -> c < ' ') '"']. *)
 
   (** {1 Whitespace, comments and tokens} *)
 
